@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getSocket } from './socket';
+import {
+  useMusicSession,
+  type MusicActions,
+  type MusicSnapshot,
+} from '@/music/useMusicSession';
 import type {
   ClientState,
   CreateResponse,
@@ -32,7 +37,12 @@ export type SessionActions = {
   reset: () => void;
 };
 
-export function useSession(): SessionSnapshot & SessionActions {
+export type SessionWithMusic = SessionSnapshot &
+  SessionActions & {
+    music: MusicSnapshot & MusicActions;
+  };
+
+export function useSession(): SessionWithMusic {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<ClientState | null>(null);
   const [you, setYou] = useState<Participant | null>(null);
@@ -138,6 +148,8 @@ export function useSession(): SessionSnapshot & SessionActions {
 
   const isHost = !!(state && you && state.hostId === you.id);
 
+  const music = useMusicSession({ clockOffsetMs: clockOffset });
+
   return {
     connected,
     state,
@@ -153,5 +165,6 @@ export function useSession(): SessionSnapshot & SessionActions {
     tap,
     start,
     reset,
+    music,
   };
 }

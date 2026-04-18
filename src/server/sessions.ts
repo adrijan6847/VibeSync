@@ -1,4 +1,4 @@
-import type { Server } from 'socket.io';
+import type { Server, Socket } from 'socket.io';
 import type {
   ClientState,
   CreateResponse,
@@ -7,6 +7,13 @@ import type {
   Phase,
   TickPayload,
 } from '../lib/types';
+import {
+  attachMusicHandlers,
+  disposeMusicSession,
+  ensureMusicSession,
+  toMusicState,
+} from './music';
+import { MUSIC_EVENTS, type ProviderSelectEvent } from '../music/sync/events';
 
 type Session = {
   code: string;
@@ -87,13 +94,42 @@ const DROP_LEAD_MS = 1200;
 const DROP_DURATION_MS = 2600;
 const AFTERGLOW_MS = 4200;
 
+/**
+ * Remove a socket from a session and broadcast the state change to remaining
+ * participants. Called on disconnect, and also when a socket joins/creates a
+ * new session while already attached to a different one — otherwise the
+ * abandoned room keeps broadcasting `tick` events to the socket, which the
+ * client's single `onTick` handler then fights the new room over, producing
+ * phase oscillation.
+ */
+function detachFromSession(
+  io: Server,
+  socket: Socket,
+  code: string,
+): void {
+  const s = sessions.get(code);
+  if (!s) return;
+  s.participants.delete(socket.id);
+  socket.leave(code);
+  if (s.hostId === socket.id) {
+    const next = s.participants.values().next().value;
+    s.hostId = next ? next.id : null;
+  }
+  if (s.participants.size > 0) {
+    io.to(code).emit('state', toClientState(s));
+  }
+}
+
 export function createEngine(io: Server): void {
   setInterval(() => {
     const now = Date.now();
     for (const s of sessions.values()) {
       if (s.participants.size === 0) {
         // Garbage collect empty sessions older than 60s
-        if (now - s.createdAt > 60_000) sessions.delete(s.code);
+        if (now - s.createdAt > 60_000) {
+          sessions.delete(s.code);
+          disposeMusicSession(s.code);
+        }
         continue;
       }
       const dt = (now - s.lastTick) / 1000;
@@ -157,23 +193,48 @@ export function createEngine(io: Server): void {
   io.on('connection', (socket) => {
     let joinedCode: string | null = null;
 
+    const detachMusic = attachMusicHandlers(io, socket, () => {
+      if (!joinedCode) return { code: null, isHost: false };
+      const s = sessions.get(joinedCode);
+      return {
+        code: joinedCode,
+        isHost: s ? s.hostId === socket.id : false,
+      };
+    });
+
     socket.on('clock:sync', (t0: number, cb: (r: { t0: number; tServer: number }) => void) => {
       cb({ t0, tServer: Date.now() });
     });
 
+    socket.on(MUSIC_EVENTS.providerSelect, (ev: ProviderSelectEvent) => {
+      if (!joinedCode) return;
+      const s = sessions.get(joinedCode);
+      if (!s) return;
+      const p = s.participants.get(socket.id);
+      if (!p) return;
+      p.provider = ev.provider;
+      io.to(s.code).emit('state', toClientState(s));
+    });
+
     socket.on('session:create', (_payload: unknown, cb: (r: CreateResponse) => void) => {
+      if (joinedCode) {
+        detachFromSession(io, socket, joinedCode);
+        joinedCode = null;
+      }
       const s = makeSession(socket.id);
       const p: Participant = {
         id: socket.id,
         hue: randomHue(),
         taps: 0,
         joinedAt: Date.now(),
+        provider: null,
       };
       s.participants.set(socket.id, p);
       socket.join(s.code);
       joinedCode = s.code;
       cb({ code: s.code, you: p, state: toClientState(s) });
       io.to(s.code).emit('state', toClientState(s));
+      socket.emit(MUSIC_EVENTS.state, toMusicState(ensureMusicSession(s.code)));
     });
 
     socket.on(
@@ -185,11 +246,16 @@ export function createEngine(io: Server): void {
           cb({ ok: false, error: 'Session not found' });
           return;
         }
+        if (joinedCode && joinedCode !== key) {
+          detachFromSession(io, socket, joinedCode);
+          joinedCode = null;
+        }
         const p: Participant = {
           id: socket.id,
           hue: randomHue(),
           taps: 0,
           joinedAt: Date.now(),
+          provider: null,
         };
         s.participants.set(socket.id, p);
         if (!s.hostId) s.hostId = socket.id;
@@ -197,6 +263,7 @@ export function createEngine(io: Server): void {
         joinedCode = s.code;
         cb({ ok: true, state: toClientState(s), you: p });
         io.to(s.code).emit('state', toClientState(s));
+        socket.emit(MUSIC_EVENTS.state, toMusicState(ensureMusicSession(s.code)));
       },
     );
 
@@ -238,6 +305,7 @@ export function createEngine(io: Server): void {
     });
 
     socket.on('disconnect', () => {
+      detachMusic();
       if (!joinedCode) return;
       const s = sessions.get(joinedCode);
       if (!s) return;

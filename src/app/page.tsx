@@ -57,7 +57,10 @@ export default function LandingPage() {
     const s = await ensureConnected();
     s.emit('session:join', { code: normalized }, (r: JoinResponse) => {
       if (r.ok) {
-        router.push(`/s/${normalized}`);
+        // ?j=1 tells SessionClient we already joined on this socket —
+        // skips the auto-join effect so the server doesn't see a duplicate
+        // session:join and rebroadcast state twice.
+        router.push(`/s/${normalized}?j=1`);
       } else {
         setError(r.error || 'Could not join');
         setBusy(null);

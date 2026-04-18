@@ -1,3 +1,5 @@
+import type { ProviderId } from '@/music/types';
+
 export type Phase = 'lobby' | 'building' | 'peak' | 'drop' | 'afterglow';
 
 export type Participant = {
@@ -5,6 +7,8 @@ export type Participant = {
   hue: number;
   taps: number;
   joinedAt: number;
+  /** Streaming service the participant plays through. null until picked. */
+  provider: ProviderId | null;
 };
 
 export type ClientState = {

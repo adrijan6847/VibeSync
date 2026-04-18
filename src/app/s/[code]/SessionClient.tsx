@@ -5,13 +5,18 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AmbientBackdrop } from '@/components/AmbientBackdrop';
 import { DropOverlay } from '@/components/DropOverlay';
-import { EnergyMeter } from '@/components/EnergyMeter';
+import { HostSearchDock } from '@/components/music/HostSearchDock';
+import { MusicPanel } from '@/components/music/MusicPanel';
+import { PlaybackBar } from '@/components/music/PlaybackBar';
 import { Orb } from '@/components/Orb';
 import { ParticipantRing } from '@/components/ParticipantRing';
 import { QR } from '@/components/QR';
 import { TapSurface } from '@/components/TapSurface';
 import { tick, unlock } from '@/lib/sound';
 import { useSession } from '@/lib/useSession';
+import { providerDisplayName } from '@/music/adapters';
+import type { ProviderId } from '@/music/types';
+import type { Participant } from '@/lib/types';
 
 type Props = { code: string };
 
@@ -19,28 +24,48 @@ export default function SessionClient({ code }: Props) {
   const router = useRouter();
   const search = useSearchParams();
   const isHostIntent = search.get('host') === '1';
+  // Set by the home page on a successful pre-navigation join. Tells us the
+  // server already has this socket in the room, so the auto-join effect
+  // below should skip instead of firing a duplicate session:join.
+  const alreadyJoined = search.get('j') === '1';
 
   const session = useSession();
-  const { connected, state, you, isHost, energy, phase, beatId, drop, clockOffset } = session;
+  const { connected, state, you, isHost, energy, phase, beatId, drop, clockOffset, music } = session;
+  const hostControl = isHost || isHostIntent;
 
-  const [joinAttempted, setJoinAttempted] = useState(false);
   const [notFound, setNotFound] = useState(false);
-  const [confirmingReset, setConfirmingReset] = useState(false);
-  const resetConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref (not state) so a StrictMode double-mount or a render-triggered effect
+  // re-run can't fire a second join while the first is still in flight.
+  const joinAttemptedRef = useRef(alreadyJoined);
+
+  // Strip ?j=1 from the URL after reading it so a page refresh still
+  // triggers the auto-join fallback below.
+  useEffect(() => {
+    if (!alreadyJoined) return;
+    const params = new URLSearchParams(window.location.search);
+    params.delete('j');
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${qs ? `?${qs}` : ''}`,
+    );
+  }, [alreadyJoined]);
 
   // Auto-join if we don't already have state for this code
   useEffect(() => {
-    if (!connected || state?.code === code || joinAttempted) return;
-    setJoinAttempted(true);
+    if (!connected || state?.code === code || joinAttemptedRef.current) return;
+    joinAttemptedRef.current = true;
     session.join(code).then((r) => {
       if (!r.ok) setNotFound(true);
     });
-  }, [connected, state, code, joinAttempted, session]);
+  }, [connected, state, code, session]);
 
   const joinUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
     const url = new URL(window.location.href);
     url.searchParams.delete('host');
+    url.searchParams.delete('j');
     return url.toString();
   }, []);
 
@@ -54,27 +79,6 @@ export default function SessionClient({ code }: Props) {
     unlock();
     session.start();
   }, [session]);
-
-  const handleReset = useCallback(() => {
-    if (confirmingReset) {
-      if (resetConfirmTimerRef.current) clearTimeout(resetConfirmTimerRef.current);
-      resetConfirmTimerRef.current = null;
-      setConfirmingReset(false);
-      session.reset();
-      return;
-    }
-    setConfirmingReset(true);
-    resetConfirmTimerRef.current = setTimeout(() => {
-      setConfirmingReset(false);
-      resetConfirmTimerRef.current = null;
-    }, 3000);
-  }, [confirmingReset, session]);
-
-  useEffect(() => {
-    return () => {
-      if (resetConfirmTimerRef.current) clearTimeout(resetConfirmTimerRef.current);
-    };
-  }, []);
 
   // Unlock audio on any first interaction
   useEffect(() => {
@@ -257,6 +261,7 @@ export default function SessionClient({ code }: Props) {
                       {participants.slice(0, 10).map((p) => (
                         <span
                           key={p.id}
+                          title={p.provider ? providerDisplayName(p.provider) : 'picking…'}
                           className="block h-[5px] w-[5px] rounded-full"
                           style={{
                             background: `hsl(${p.hue}, 95%, 70%)`,
@@ -264,9 +269,15 @@ export default function SessionClient({ code }: Props) {
                         />
                       ))}
                     </div>
+                    <ProviderLegend participants={participants} />
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* MIDDLE: music setup (host-driven; guests see read-only once track is loaded) */}
+            <div className="pointer-events-auto w-full max-w-[420px] px-4 sm:px-0">
+              <MusicPanel music={music} isHost={hostControl} />
             </div>
 
             {/* BOTTOM: CTA */}
@@ -298,49 +309,49 @@ export default function SessionClient({ code }: Props) {
         </div>
       )}
 
-      {/* Live HUD — phase label + energy */}
+      {/* Live HUD — playback + participant list */}
       {!isLobby && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-5 pb-6 transition-opacity duration-500 sm:px-10 sm:pb-10">
             <div className="mx-auto flex max-w-[720px] flex-col gap-3">
-              <div className="flex items-end justify-between">
-                <PhaseLabel phase={phase} />
-                <TapHint phase={phase} />
-              </div>
-              <EnergyMeter energy={energy} phase={phase} />
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  {participants.slice(0, 12).map((p) => (
-                    <motion.span
-                      key={p.id}
-                      initial={{ scale: 0, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
-                      className="block h-[5px] w-[5px] rounded-full"
-                      style={{
-                        background: `hsl(${p.hue}, 95%, 70%)`,
-                        outline: p.id === you?.id ? '1px solid rgba(255,255,255,0.6)' : undefined,
-                        outlineOffset: 2,
-                      }}
-                    />
-                  ))}
+              {music.nowPlaying && (
+                <div className="pointer-events-auto">
+                  <PlaybackBar
+                    nowPlaying={music.nowPlaying}
+                    clock={music.clock}
+                    clockOffsetMs={clockOffset}
+                    isHost={hostControl}
+                    onPlay={music.play}
+                    onPause={music.pause}
+                    onSeek={music.seek}
+                  />
                 </div>
-                {isHost && (
-                  <div className="pointer-events-auto">
-                    <button
-                      onClick={handleReset}
-                      aria-label={confirmingReset ? 'Confirm reset' : 'Reset session'}
-                      className={`mono rounded-full border px-3.5 py-1.5 text-[9.5px] font-medium uppercase tracking-[0.18em] transition-[background,color,border-color] duration-180 ${
-                        confirmingReset
-                          ? 'border-[#bcdcff]/60 bg-[#bcdcff]/10 text-white/90 hover:bg-[#bcdcff]/15'
-                          : 'border-white/10 bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/65'
-                      }`}
-                    >
-                      {confirmingReset ? 'tap again' : 'reset'}
-                    </button>
-                  </div>
-                )}
+              )}
+              <div className="flex items-center gap-1.5">
+                {participants.slice(0, 12).map((p) => (
+                  <motion.span
+                    key={p.id}
+                    title={p.provider ? providerDisplayName(p.provider) : 'picking…'}
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
+                    className="block h-[5px] w-[5px] rounded-full"
+                    style={{
+                      background: `hsl(${p.hue}, 95%, 70%)`,
+                      outline: p.id === you?.id ? '1px solid rgba(255,255,255,0.6)' : undefined,
+                      outlineOffset: 2,
+                    }}
+                  />
+                ))}
+                <ProviderLegend participants={participants} compact />
               </div>
             </div>
+        </div>
+      )}
+
+      {/* Host-only track swap dock — live phase, top center */}
+      {!isLobby && hostControl && music.adapterReady && (
+        <div className="pointer-events-none absolute left-1/2 top-16 z-30 -translate-x-1/2 sm:top-20">
+          <HostSearchDock onSearch={music.search} onPick={music.load} />
         </div>
       )}
 
@@ -355,64 +366,33 @@ export default function SessionClient({ code }: Props) {
   );
 }
 
-function PhaseLabel({ phase }: { phase: string }) {
-  const map: Record<string, { label: string; tone: string; glow?: string }> = {
-    building: { label: 'build it up', tone: 'text-white/50' },
-    peak: {
-      label: 'almost there',
-      tone: 'text-[#bcdcff]',
-      glow: '0 0 18px rgba(188, 220, 255, 0.5)',
-    },
-    drop: {
-      label: 'drop',
-      tone: 'text-white',
-      glow: '0 0 24px rgba(255, 255, 255, 0.85)',
-    },
-    afterglow: { label: 'afterglow', tone: 'text-[#cfe0ef]' },
-  };
-  const v = map[phase] ?? { label: phase, tone: 'text-white/55' };
-  const isPeakish = phase === 'peak' || phase === 'drop';
+function ProviderLegend({
+  participants,
+  compact = false,
+}: {
+  participants: Participant[];
+  compact?: boolean;
+}) {
+  const counts = new Map<ProviderId, number>();
+  for (const p of participants) {
+    if (!p.provider) continue;
+    counts.set(p.provider, (counts.get(p.provider) ?? 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  const entries = Array.from(counts.entries());
   return (
-    <motion.div
-      key={phase}
-      initial={{ opacity: 0, y: 6, letterSpacing: '0.4em' }}
-      animate={{ opacity: 1, y: 0, letterSpacing: '0.22em' }}
-      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-      className="label-caps flex items-center gap-2"
+    <span
+      className={`mono ${
+        compact ? 'ml-3' : 'mt-1.5'
+      } block text-[9.5px] font-medium tracking-[0.14em] text-white/35`}
     >
-      <motion.span
-        className={v.tone}
-        animate={isPeakish ? { opacity: [0.7, 1, 0.7] } : undefined}
-        transition={isPeakish ? { duration: 0.9, repeat: Infinity } : undefined}
-        style={v.glow ? { textShadow: v.glow } : undefined}
-      >
-        {v.label}
-      </motion.span>
-    </motion.div>
-  );
-}
-
-function TapHint({ phase }: { phase: string }) {
-  if (phase === 'drop')
-    return (
-      <span className="label-caps text-white/60">
-        hold on
-      </span>
-    );
-  if (phase === 'afterglow')
-    return (
-      <span className="label-caps text-white/40">
-        cooling down
-      </span>
-    );
-  return (
-    <motion.span
-      animate={{ opacity: [0.45, 0.85, 0.45] }}
-      transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-      className="label-caps text-white/50"
-    >
-      tap to charge
-    </motion.span>
+      {entries
+        .map(([id, n]) => {
+          const name = providerDisplayName(id).toLowerCase();
+          return n > 1 ? `${n} ${name}` : name;
+        })
+        .join(' · ')}
+    </span>
   );
 }
 
