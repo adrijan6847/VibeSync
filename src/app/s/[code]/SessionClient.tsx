@@ -25,6 +25,8 @@ export default function SessionClient({ code }: Props) {
 
   const [joinAttempted, setJoinAttempted] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const resetConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-join if we don't already have state for this code
   useEffect(() => {
@@ -53,6 +55,27 @@ export default function SessionClient({ code }: Props) {
     session.start();
   }, [session]);
 
+  const handleReset = useCallback(() => {
+    if (confirmingReset) {
+      if (resetConfirmTimerRef.current) clearTimeout(resetConfirmTimerRef.current);
+      resetConfirmTimerRef.current = null;
+      setConfirmingReset(false);
+      session.reset();
+      return;
+    }
+    setConfirmingReset(true);
+    resetConfirmTimerRef.current = setTimeout(() => {
+      setConfirmingReset(false);
+      resetConfirmTimerRef.current = null;
+    }, 3000);
+  }, [confirmingReset, session]);
+
+  useEffect(() => {
+    return () => {
+      if (resetConfirmTimerRef.current) clearTimeout(resetConfirmTimerRef.current);
+    };
+  }, []);
+
   // Unlock audio on any first interaction
   useEffect(() => {
     const h = () => unlock();
@@ -63,6 +86,28 @@ export default function SessionClient({ code }: Props) {
       window.removeEventListener('keydown', h);
     };
   }, []);
+
+  // Spacebar shortcut: start (host, lobby) / tap (live, non-drop)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (phase === 'lobby') {
+        if (isHost || isHostIntent) {
+          e.preventDefault();
+          handleStart();
+        }
+        return;
+      }
+      if (phase !== 'drop') {
+        e.preventDefault();
+        handleTap();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, isHost, isHostIntent, handleStart, handleTap]);
 
   // Drop fire — trigger any extra local fx
   const dropFireCountRef = useRef(0);
@@ -119,24 +164,34 @@ export default function SessionClient({ code }: Props) {
           <span className="relative flex h-1.5 w-1.5">
             <span
               className={`absolute inline-flex h-full w-full rounded-full ${
-                connected ? 'animate-ping' : ''
+                connected ? 'animate-ping' : 'animate-pulse'
               } opacity-60`}
               style={{
                 background: connected
                   ? 'rgba(188, 220, 255, 0.5)'
-                  : 'rgba(255, 255, 255, 0.15)',
+                  : 'rgba(200, 215, 230, 0.35)',
               }}
             />
             <span
               className="relative inline-flex h-1.5 w-1.5 rounded-full"
               style={{
-                background: connected ? '#bcdcff' : 'rgba(255,255,255,0.3)',
+                background: connected ? '#bcdcff' : 'rgba(200, 215, 230, 0.5)',
               }}
             />
           </span>
-          <span className="uppercase">{code}</span>
-          <span className="text-white/20">·</span>
-          <span>{participants.length} live</span>
+          {connected ? (
+            <>
+              <span className="uppercase">{code}</span>
+              <span className="text-white/20">·</span>
+              <span>{participants.length} live</span>
+            </>
+          ) : (
+            <>
+              <span className="uppercase">{code}</span>
+              <span className="text-white/20">·</span>
+              <span className="text-white/65">connecting…</span>
+            </>
+          )}
         </div>
       </div>
 
@@ -272,10 +327,15 @@ export default function SessionClient({ code }: Props) {
                 {isHost && (
                   <div className="pointer-events-auto">
                     <button
-                      onClick={session.reset}
-                      className="mono rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-[9.5px] font-medium uppercase tracking-[0.18em] text-white/45 transition-[background,color] duration-180 hover:bg-white/10 hover:text-white/65"
+                      onClick={handleReset}
+                      aria-label={confirmingReset ? 'Confirm reset' : 'Reset session'}
+                      className={`mono rounded-full border px-3.5 py-1.5 text-[9.5px] font-medium uppercase tracking-[0.18em] transition-[background,color,border-color] duration-180 ${
+                        confirmingReset
+                          ? 'border-[#bcdcff]/60 bg-[#bcdcff]/10 text-white/90 hover:bg-[#bcdcff]/15'
+                          : 'border-white/10 bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/65'
+                      }`}
                     >
-                      reset
+                      {confirmingReset ? 'tap again' : 'reset'}
                     </button>
                   </div>
                 )}
@@ -351,7 +411,7 @@ function TapHint({ phase }: { phase: string }) {
       transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
       className="label-caps text-white/50"
     >
-      tap anywhere
+      tap to charge
     </motion.span>
   );
 }

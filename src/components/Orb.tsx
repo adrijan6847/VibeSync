@@ -172,6 +172,7 @@ function RingOrbit({ e, phase }: { e: number; phase: Phase }) {
           style={{
             borderColor: 'rgba(200, 220, 240, 0.16)',
             boxShadow: '0 0 36px rgba(158, 201, 255, 0.18) inset',
+            willChange: 'transform, opacity',
           }}
           animate={{
             scale: [1 + i * 0.04, 1.22 + i * 0.05, 1 + i * 0.04],

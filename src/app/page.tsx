@@ -3,7 +3,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useMemo } from 'react';
-import { ThreeBackground } from '@/components/ThreeBackground';
+import { AmbientBackdrop } from '@/components/AmbientBackdrop';
 import { getSocket } from '@/lib/socket';
 import type { CreateResponse, JoinResponse } from '@/lib/types';
 
@@ -48,7 +48,7 @@ export default function LandingPage() {
     e?.preventDefault();
     if (busy) return;
     const normalized = code.toUpperCase().trim();
-    if (normalized.length < 3) {
+    if (normalized.length < 4) {
       setError('Enter the 4-letter code');
       return;
     }
@@ -67,7 +67,7 @@ export default function LandingPage() {
 
   return (
     <main className="relative min-h-screen overflow-hidden">
-      <ThreeBackground />
+      <AmbientBackdrop intensity={0.6} />
 
       <div className="relative z-10 flex min-h-screen flex-col">
         {/* Header */}
@@ -78,8 +78,17 @@ export default function LandingPage() {
               VibeSync
             </span>
           </div>
-          <div className="label-caps text-white/35">
-            v0 · live
+          <div className="label-caps flex items-center gap-2 text-white/35">
+            <span className="relative flex h-1.5 w-1.5">
+              <span
+                className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60"
+                style={{ background: 'rgba(188, 220, 255, 0.5)' }}
+              />
+              <span
+                className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[#bcdcff]"
+              />
+            </span>
+            live
           </div>
         </header>
 
@@ -137,7 +146,7 @@ export default function LandingPage() {
               <button
                 onClick={handleCreate}
                 disabled={!!busy}
-                className="group relative w-full overflow-hidden rounded-2xl border border-white/20 bg-white/95 px-8 py-[18px] text-[14.5px] font-semibold tracking-[-0.01em] text-[#0a0a0a] shadow-[0_16px_48px_-16px_rgba(255,255,255,0.4)] transition-[background,box-shadow] duration-200 hover:bg-white hover:shadow-[0_20px_60px_-16px_rgba(255,255,255,0.5)] disabled:opacity-50"
+                className="group relative w-full overflow-hidden rounded-2xl bg-white px-8 py-[18px] text-[14.5px] font-semibold tracking-[-0.01em] text-[#0a0a0a] transition-colors duration-200 hover:bg-[#f2f7fc] disabled:opacity-50"
               >
                 <span className="relative z-10 flex items-center justify-center gap-2.5">
                   {busy === 'create' ? 'Opening room…' : 'Start a session'}
@@ -221,7 +230,7 @@ function WordEffect({ word }: { word: string }) {
         className="inline-block"
         style={{
           backgroundImage:
-            'linear-gradient(90deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.5) 28%, #ff7ab6 40%, #feca57 50%, #6ec5ff 60%, rgba(255,255,255,0.5) 72%, rgba(255,255,255,0.5) 100%)',
+            'linear-gradient(90deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.5) 28%, #9ec9ff 40%, #ffffff 50%, #bcdcff 60%, rgba(255,255,255,0.5) 72%, rgba(255,255,255,0.5) 100%)',
           backgroundSize: '300% 100%',
           WebkitBackgroundClip: 'text',
           backgroundClip: 'text',

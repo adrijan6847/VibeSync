@@ -25,18 +25,31 @@ const mono = JetBrains_Mono({
   display: "swap",
 });
 
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+const tagline =
+  "A shared live experience. Join the session. Raise the room. Feel the drop together.";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: "VibeSync — one room, one frequency",
-  description:
-    "A shared live experience. Join the session. Raise the room. Feel the drop together.",
+  description: tagline,
+  openGraph: {
+    type: "website",
+    siteName: "VibeSync",
+    title: "VibeSync — one room, one frequency",
+    description: tagline,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "VibeSync — one room, one frequency",
+    description: tagline,
+  },
 };
 
 export const viewport: Viewport = {
   themeColor: "#070809",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
   viewportFit: "cover",
 };
 

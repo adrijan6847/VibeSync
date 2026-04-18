@@ -64,6 +64,7 @@ export function ParticipantRing({
                   height: isYou ? 14 : 10,
                   background: `hsl(${p.hue}, 95%, 70%)`,
                   boxShadow: `0 0 14px hsl(${p.hue}, 95%, 68%), 0 0 28px hsl(${p.hue}, 95%, 55%)`,
+                  willChange: 'transform, opacity',
                 }}
               />
               {isYou && (

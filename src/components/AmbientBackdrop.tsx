@@ -24,6 +24,7 @@ export function AmbientBackdrop({ intensity = 0.6 }: { intensity?: number }) {
             radial-gradient(54% 46% at 52% 52%, rgba(188, 220, 255, ${0.10 * intensity}) 0%, transparent 74%)
           `,
           filter: 'blur(72px)',
+          willChange: 'opacity',
         }}
       />
       {/* Layer 2: slow atmospheric drift — steel silver */}
@@ -37,6 +38,7 @@ export function AmbientBackdrop({ intensity = 0.6 }: { intensity?: number }) {
             radial-gradient(26% 22% at 70% 30%, rgba(158, 201, 255, ${0.12 * intensity}) 0%, transparent 68%)
           `,
           filter: 'blur(96px)',
+          willChange: 'transform',
         }}
       />
       {/* Vignette: carbon falloff */}

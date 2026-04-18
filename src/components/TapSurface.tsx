@@ -12,9 +12,12 @@ type Props = {
   children?: React.ReactNode;
 };
 
+const TAP_MIN_INTERVAL_MS = 40;
+
 export function TapSurface({ hue, enabled, onTap, children }: Props) {
   const [ripples, setRipples] = useState<Ripple[]>([]);
   const idRef = useRef(0);
+  const lastTapAtRef = useRef(0);
 
   const handlePointer = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -29,6 +32,9 @@ export function TapSurface({ hue, enabled, onTap, children }: Props) {
         setRipples((rs) => rs.filter((r) => r.id !== id));
       }, 900);
       if (navigator.vibrate) navigator.vibrate(10);
+      const now = performance.now();
+      if (now - lastTapAtRef.current < TAP_MIN_INTERVAL_MS) return;
+      lastTapAtRef.current = now;
       onTap();
     },
     [enabled, hue, onTap],
