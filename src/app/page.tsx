@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useState, useEffect, useMemo } from 'react';
 import { AmbientBackdrop } from '@/components/AmbientBackdrop';
 import { getSocket } from '@/lib/socket';
-import type { CreateResponse, JoinResponse } from '@/lib/types';
+import type { JoinResponse } from '@/lib/types';
 
 export default function LandingPage() {
   const router = useRouter();
@@ -34,14 +34,13 @@ export default function LandingPage() {
     return s;
   }
 
-  async function handleCreate() {
+  function handleCreate() {
     if (busy) return;
     setBusy('create');
     setError(null);
-    const s = await ensureConnected();
-    s.emit('session:create', {}, (r: CreateResponse) => {
-      router.push(`/s/${r.code}?host=1`);
-    });
+    // Host links Spotify + Apple Music on /sync; the room is minted there
+    // once both providers come online, then forwards to /s/{code}?host=1.
+    router.push('/sync');
   }
 
   async function handleJoin(e?: React.FormEvent) {
@@ -152,7 +151,7 @@ export default function LandingPage() {
                 className="group relative w-full overflow-hidden rounded-2xl bg-white px-8 py-[18px] text-[14.5px] font-semibold tracking-[-0.01em] text-[#0a0a0a] transition-colors duration-200 hover:bg-[#f2f7fc] disabled:opacity-50"
               >
                 <span className="relative z-10 flex items-center justify-center gap-2.5">
-                  {busy === 'create' ? 'Opening room…' : 'Start a session'}
+                  {busy === 'create' ? 'Syncing…' : 'Sync Music Platform'}
                   <Arrow />
                 </span>
               </button>
