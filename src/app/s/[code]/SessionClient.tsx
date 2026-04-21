@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AmbientBackdrop } from '@/components/AmbientBackdrop';
 import { DropOverlay } from '@/components/DropOverlay';
+import { HostLobbyPanel } from '@/components/music/HostLobbyPanel';
 import { HostSearchDock } from '@/components/music/HostSearchDock';
 import { MusicPanel } from '@/components/music/MusicPanel';
 import { PlaybackBar } from '@/components/music/PlaybackBar';
@@ -275,9 +276,18 @@ export default function SessionClient({ code }: Props) {
               )}
             </div>
 
-            {/* MIDDLE: music setup (host-driven; guests see read-only once track is loaded) */}
+            {/* MIDDLE: music setup — host gets guest roster + search (already
+                linked at /sync); guests still see the picker here. */}
             <div className="pointer-events-auto w-full max-w-[420px] px-4 sm:px-0">
-              <MusicPanel music={music} isHost={hostControl} />
+              {hostControl ? (
+                <HostLobbyPanel
+                  music={music}
+                  participants={participants}
+                  youId={you?.id}
+                />
+              ) : (
+                <MusicPanel music={music} isHost={hostControl} />
+              )}
             </div>
 
             {/* BOTTOM: CTA */}
