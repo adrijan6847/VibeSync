@@ -107,6 +107,27 @@ function readToken(): string | null {
   }
 }
 
+function clearStoredToken(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Turn the SDK's generic "Authentication failed" into a message the UI
+ * can show to the user. The SDK itself doesn't distinguish expired-token
+ * from wrong-scope from non-Premium, but in practice — once scopes are
+ * correct at OAuth time — the remaining causes are an expired token or
+ * an account without Web Playback access. The retry path is the same
+ * for both: reconnect to Spotify.
+ */
+function friendlyAuthError(_raw: string | undefined): string {
+  return 'Spotify rejected the session. Please reconnect your account.';
+}
+
 let sdkPromise: Promise<SpotifySDK> | null = null;
 function loadSDK(): Promise<SpotifySDK> {
   if (sdkPromise) return sdkPromise;
@@ -161,6 +182,12 @@ class SpotifyAdapter implements MusicProvider {
       getOAuthToken: (cb) => cb(this.token ?? ''),
       volume: 0.8,
     });
+
+    // Fatal auth/account errors captured here so the device-ready race
+    // below can reject with an actionable message instead of a generic
+    // "device did not become ready in time" timeout.
+    let fatalAuthError: string | null = null;
+
     player.addListener('ready', ({ device_id }) => {
       this.deviceId = device_id;
       this.emit();
@@ -176,35 +203,47 @@ class SpotifyAdapter implements MusicProvider {
       this.lastPositionAt = performance.now();
       this.emit();
     });
-    for (const ev of [
-      'initialization_error',
-      'authentication_error',
-      'account_error',
-      'playback_error',
-    ] as const) {
-      player.addListener(ev, ({ message }) => {
-        // Harmless transients the SDK surfaces during normal transport:
-        //   - "no list was loaded"  → touched transport before first queue
-        //   - "operation is not allowed" → overlapping play/seek calls
-        // We already guard both in code; silencing the log noise.
-        if (
-          ev === 'playback_error' &&
-          (message?.includes('no list was loaded') ||
-            message?.includes('operation is not allowed'))
-        ) {
-          return;
-        }
-        console.error(`[spotify:${ev}]`, message);
-      });
-    }
+    player.addListener('authentication_error', ({ message }) => {
+      fatalAuthError = friendlyAuthError(message);
+      // The cached token is dead for the Web Playback SDK — wipe it so
+      // the next attempt forces a fresh OAuth round-trip rather than
+      // silently retrying the same bad token.
+      clearStoredToken();
+      console.error('[spotify:authentication_error]', message);
+    });
+    player.addListener('account_error', ({ message }) => {
+      fatalAuthError =
+        'Spotify Premium is required to play music in a VibeSync session. ' +
+        'Upgrade your account and reconnect.';
+      console.error('[spotify:account_error]', message);
+    });
+    player.addListener('initialization_error', ({ message }) => {
+      console.error('[spotify:initialization_error]', message);
+    });
+    player.addListener('playback_error', ({ message }) => {
+      if (
+        message?.includes('no list was loaded') ||
+        message?.includes('operation is not allowed')
+      ) {
+        return;
+      }
+      console.error('[spotify:playback_error]', message);
+    });
+
     const ok = await player.connect();
     if (!ok) throw new Error('Spotify player failed to connect');
     this.player = player;
 
-    // Wait up to 5s for the 'ready' event to provide a device_id.
+    // Race device-ready against a fatal auth error. 5s is enough for the
+    // SDK to either hand us a device_id or fail the Connect handshake.
     const deadline = performance.now() + 5000;
-    while (!this.deviceId && performance.now() < deadline) {
+    while (!this.deviceId && !fatalAuthError && performance.now() < deadline) {
       await new Promise((r) => setTimeout(r, 100));
+    }
+    if (fatalAuthError) {
+      await player.disconnect();
+      this.player = null;
+      throw new Error(fatalAuthError);
     }
     if (!this.deviceId) {
       throw new Error('Spotify device did not become ready in time');

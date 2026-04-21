@@ -13,11 +13,12 @@
  * this component is strictly the host path.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SuggestiveSearch } from './SuggestiveSearch';
 import type { MusicActions, MusicSnapshot } from '@/music/useMusicSession';
 import type { Participant } from '@/lib/types';
+import { startSpotifyLogin } from '@/music/adapters/spotify-auth';
 
 type Props = {
   music: MusicSnapshot & MusicActions;
@@ -41,6 +42,7 @@ export function HostLobbyPanel({ music, participants, youId }: Props) {
   }, []);
 
   const ready = music.provider !== null && music.adapterReady;
+  const hasError = Boolean(music.adapterError);
 
   return (
     <div className="panel flex flex-col gap-4 rounded-2xl px-4 py-4 backdrop-blur-xl">
@@ -49,7 +51,17 @@ export function HostLobbyPanel({ music, participants, youId }: Props) {
       <div className="h-px w-full bg-[var(--stroke)]" />
 
       <AnimatePresence mode="wait">
-        {ready ? (
+        {hasError ? (
+          <motion.div
+            key="error"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <SpotifyReconnect message={music.adapterError ?? ''} />
+          </motion.div>
+        ) : ready ? (
           <motion.div
             key="search"
             initial={{ opacity: 0, y: 4 }}
@@ -82,11 +94,41 @@ export function HostLobbyPanel({ music, participants, youId }: Props) {
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white/60" />
             </span>
             <span className="label-caps text-[var(--fg-mute)]">
-              {music.adapterError ? 'connection lost — retry' : 'syncing your music…'}
+              syncing your music…
             </span>
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+function SpotifyReconnect({ message }: { message: string }) {
+  const [busy, setBusy] = useState(false);
+  const reconnect = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const returnTo =
+        typeof window !== 'undefined'
+          ? window.location.pathname + window.location.search
+          : '/';
+      await startSpotifyLogin(returnTo);
+    } catch {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-2 px-1 py-1">
+      <span className="text-[13px] text-white/85">{message}</span>
+      <button
+        type="button"
+        onClick={reconnect}
+        disabled={busy}
+        className="label-caps self-start rounded-full border border-[var(--stroke-strong)] px-3 py-1.5 text-white/90 transition-colors duration-180 hover:bg-white/[0.06] disabled:opacity-60"
+      >
+        {busy ? 'reconnecting…' : 'reconnect spotify'}
+      </button>
     </div>
   );
 }
