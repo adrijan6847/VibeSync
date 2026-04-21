@@ -22,7 +22,7 @@ import { useRouter } from 'next/navigation';
 import { CanvasRevealEffect } from '@/components/shader/CanvasRevealEffect';
 import { getSocket } from '@/lib/socket';
 import type { CreateResponse } from '@/lib/types';
-import { getAdapter } from '@/music/adapters';
+import { getAdapter, setPendingProvider } from '@/music/adapters';
 // Side-effect: registers Spotify + Apple Music adapters
 import '@/music/adapters/register';
 import {
@@ -174,6 +174,10 @@ function SyncPage({ className }: { className?: string }) {
   function enterRoom() {
     const joined = code.join('');
     if (joined.length !== ROOM_CODE_LENGTH) return;
+    // Hand the room a preselected provider so MusicPanel doesn't
+    // re-prompt "Pick your music service" — both are linked here,
+    // Spotify is the primary surface, so default to it.
+    setPendingProvider('spotify');
     router.push(`/s/${joined}?host=1`);
   }
 
