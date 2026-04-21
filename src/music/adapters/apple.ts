@@ -280,6 +280,17 @@ class AppleAdapter implements MusicProvider {
     }
   }
 
+  async signOut(): Promise<void> {
+    if (this.music) {
+      await this.music.pause().catch(() => {});
+      await this.music.unauthorize().catch(() => {});
+      this.music = null;
+    }
+    this.currentCanonicalId = null;
+    this.paused = true;
+    this.emit();
+  }
+
   private emit(): void {
     const snap = this.snapshot();
     for (const l of this.listeners) l(snap);

@@ -463,6 +463,21 @@ class SpotifyAdapter implements MusicProvider {
     this.deviceId = null;
   }
 
+  async signOut(): Promise<void> {
+    if (this.player) {
+      this.player.disconnect();
+      this.player = null;
+    }
+    this.deviceId = null;
+    this.token = null;
+    this.currentCanonicalId = null;
+    this.paused = true;
+    this.lastPositionMs = 0;
+    this.lastPositionAt = 0;
+    clearStoredToken();
+    this.emit();
+  }
+
   private emit(): void {
     const snap = this.snapshot();
     for (const l of this.listeners) l(snap);

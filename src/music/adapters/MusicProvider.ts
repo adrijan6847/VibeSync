@@ -61,4 +61,11 @@ export interface MusicProvider {
 
   /** Tear down any listeners, iframes, or tokens. */
   dispose(): Promise<void>;
+
+  /**
+   * Revoke any user-level grant (not the app-level dev token) and clear
+   * any tokens this adapter persists across sessions. After this, a fresh
+   * `authenticate()` forces the user to grant permission again.
+   */
+  signOut(): Promise<void>;
 }

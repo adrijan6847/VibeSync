@@ -57,6 +57,11 @@ function SyncPage({ className }: { className?: string }) {
   const [reverseCanvasVisible, setReverseCanvasVisible] = useState(false);
 
   const didMount = useRef(false);
+  // One-shot: auto-mint fires when both providers first arrive linked
+  // (typically the return trip from Spotify's OAuth). After Back from
+  // the code screen we don't want to re-fire — the user is back in
+  // control and must press "Open your room" explicitly.
+  const autoMintedRef = useRef(false);
 
   // Reflect existing tokens on mount (handles Spotify's PKCE return).
   useEffect(() => {
@@ -75,12 +80,8 @@ function SyncPage({ className }: { className?: string }) {
     }
   }, []);
 
-  // Both providers linked → mint a session and roll to the code reveal.
-  useEffect(() => {
-    if (step !== 'connect') return;
-    if (spotify !== 'linked' || apple !== 'linked') return;
+  function mintCode() {
     if (mintingCode) return;
-
     setMintingCode(true);
     const s = getSocket();
     if (!s.connected) s.connect();
@@ -89,7 +90,6 @@ function SyncPage({ className }: { className?: string }) {
       s.emit('session:create', {}, (r: CreateResponse) => {
         const letters = (r.code ?? '').toUpperCase().slice(0, ROOM_CODE_LENGTH);
         const padded = letters.padEnd(ROOM_CODE_LENGTH, ' ').split('');
-        // Stagger the letter reveal so the pin fills dramatically.
         padded.forEach((ch, i) => {
           window.setTimeout(() => {
             setCode((prev) => {
@@ -105,7 +105,20 @@ function SyncPage({ className }: { className?: string }) {
 
     if (s.connected) onReady();
     else s.once('connect', onReady);
-  }, [spotify, apple, step, mintingCode]);
+  }
+
+  // Both providers linked → mint a session and roll to the code reveal.
+  // Only fires once per page load; Back from the code screen does not
+  // re-trigger the mint.
+  useEffect(() => {
+    if (step !== 'connect') return;
+    if (spotify !== 'linked' || apple !== 'linked') return;
+    if (autoMintedRef.current) return;
+    autoMintedRef.current = true;
+    mintCode();
+    // mintCode is stable within a render — intentional one-shot effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spotify, apple, step]);
 
   async function handleSpotify() {
     if (spotify !== 'idle') return;
@@ -154,13 +167,58 @@ function SyncPage({ className }: { className?: string }) {
     }
   }
 
-  function handleBackFromCode() {
-    // Preserve linked credentials — just bounce back to the connect step.
-    setStep('connect');
+  async function handleSpotifyDisconnect() {
+    if (spotify !== 'linked') return;
+    setError(null);
+    try {
+      await getAdapter('spotify').signOut();
+    } catch {
+      // signOut is best-effort; still clear local state below.
+    }
+    try {
+      window.localStorage.removeItem(SPOTIFY_TOKEN_KEY);
+    } catch {
+      /* ignore */
+    }
+    setSpotify('idle');
+    // Any minted room code is tied to the previous host identity. Clear
+    // it so the user has to re-confirm once they reconnect.
     setCode(Array(ROOM_CODE_LENGTH).fill(''));
     setMintingCode(false);
+  }
+
+  async function handleAppleDisconnect() {
+    if (apple !== 'linked') return;
+    setError(null);
+    try {
+      await getAdapter('apple').signOut();
+    } catch {
+      /* ignore */
+    }
+    setApple('idle');
+    setCode(Array(ROOM_CODE_LENGTH).fill(''));
+    setMintingCode(false);
+  }
+
+  function handleBackFromCode() {
+    // Preserve linked credentials — just bounce back to the connect step.
+    // Do NOT reset autoMintedRef; the user will proceed via the explicit
+    // "Open your room" button so Back doesn't trampoline them forward.
+    setStep('connect');
     setReverseCanvasVisible(false);
     setInitialCanvasVisible(true);
+  }
+
+  function handleOpenRoom() {
+    // Manual equivalent of the auto-mint. Used after Back (code already
+    // minted → just reveal) and after disconnect/reconnect (no code yet
+    // → mint a fresh one).
+    if (code.every((c) => c !== '')) {
+      setStep('code');
+      return;
+    }
+    autoMintedRef.current = true;
+    mintCode();
   }
 
   function handleLockIn() {
@@ -252,41 +310,38 @@ function SyncPage({ className }: { className?: string }) {
                       </p>
                     </div>
 
-                    <div className="space-y-4">
-                      {/* Primary — Spotify (occupies the Google slot) */}
-                      <button
-                        onClick={handleSpotify}
-                        disabled={spotify !== 'idle'}
-                        className="backdrop-blur-[2px] w-full flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 text-white border border-white/10 rounded-full py-3 px-4 transition-colors disabled:cursor-not-allowed disabled:opacity-90"
-                      >
-                        <SpotifyMark />
-                        <span>{spotifyLabel(spotify)}</span>
-                        <StatusDot status={spotify} />
-                      </button>
+                    <div className="space-y-3">
+                      <ProviderTile
+                        provider="spotify"
+                        status={spotify}
+                        onConnect={handleSpotify}
+                        onDisconnect={handleSpotifyDisconnect}
+                      />
 
-                      <div className="flex items-center gap-4">
-                        <div className="h-px bg-white/10 flex-1" />
-                        <span className="label-caps text-white/40">and</span>
-                        <div className="h-px bg-white/10 flex-1" />
-                      </div>
-
-                      {/* Secondary — Apple Music (occupies the email-form slot) */}
-                      <div className="relative">
-                        <button
-                          onClick={handleApple}
-                          disabled={apple !== 'idle'}
-                          className="w-full backdrop-blur-[1px] text-white border-1 border-white/10 rounded-full py-3 px-4 focus:outline-none focus:border focus:border-white/30 text-center transition-colors hover:bg-white/[0.04] disabled:cursor-not-allowed"
-                        >
-                          <span className="inline-flex items-center justify-center gap-2">
-                            <AppleMark />
-                            {appleLabel(apple)}
-                          </span>
-                        </button>
-                        <div className="absolute right-1.5 top-1.5 text-white w-9 h-9 flex items-center justify-center rounded-full bg-white/10 overflow-hidden pointer-events-none">
-                          <StatusDot status={apple} size="lg" />
-                        </div>
-                      </div>
+                      <ProviderTile
+                        provider="apple"
+                        status={apple}
+                        onConnect={handleApple}
+                        onDisconnect={handleAppleDisconnect}
+                      />
                     </div>
+
+                    <AnimatePresence>
+                      {spotify === 'linked' && apple === 'linked' && (
+                        <motion.button
+                          key="proceed"
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -6 }}
+                          transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+                          onClick={handleOpenRoom}
+                          disabled={mintingCode}
+                          className="w-full rounded-full bg-white text-black font-medium py-3 hover:bg-white/90 transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                          {mintingCode ? 'Minting your room…' : 'Open your room'}
+                        </motion.button>
+                      )}
+                    </AnimatePresence>
 
                     <AnimatePresence>
                       {error && (
@@ -698,113 +753,158 @@ function NavLogo() {
   );
 }
 
-/* ────────────── Provider marks + status + copy ────────────── */
+/* ────────────── Provider marks + tile + status + copy ────────────── */
 
-function SpotifyMark() {
+/**
+ * Official Spotify glyph (green circle with three sound-wave bars).
+ * Sourced from Spotify's public brand assets. Do not recolor — Spotify's
+ * brand guidelines require the logo be shown in its brand green or pure
+ * black/white. We use brand green here.
+ */
+function SpotifyMark({ size = 20 }: { size?: number }) {
   return (
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
-      <circle
-        cx="9"
-        cy="9"
-        r="7.5"
-        fill="none"
-        stroke="currentColor"
-        strokeOpacity="0.35"
-        strokeWidth="1"
-      />
+    <svg width={size} height={size} viewBox="0 0 168 168" aria-hidden>
+      <circle cx="84" cy="84" r="84" fill="#1ED760" />
       <path
-        d="M4.5 10.8c2.6-1.2 6.2-1 8.8 0.5"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        fill="none"
-      />
-      <path
-        d="M5 8.4c2.3-0.9 5.4-0.7 7.8 0.7"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        fill="none"
-        opacity="0.8"
-      />
-      <path
-        d="M5.6 6.2c1.9-0.6 4.4-0.4 6.4 0.7"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-        fill="none"
-        opacity="0.65"
+        fill="#000"
+        d="M122.4 121.057a5.23 5.23 0 0 1-7.183 1.737c-19.662-12.013-44.414-14.725-73.562-8.064a5.222 5.222 0 0 1-6.248-3.93 5.214 5.214 0 0 1 3.925-6.25c31.9-7.291 59.263-4.15 81.338 9.335a5.227 5.227 0 0 1 1.73 7.172zm10.256-22.803c-1.895 3.076-5.913 4.043-8.986 2.155-22.507-13.837-56.822-17.846-83.448-9.764-3.452 1.044-7.098-.902-8.145-4.35a6.537 6.537 0 0 1 4.353-8.143c30.413-9.228 68.222-4.754 94.07 11.127 3.074 1.89 4.045 5.911 2.156 8.975zm.881-23.744C107.534 59.5 63.065 57.963 37.385 65.758c-4.138 1.256-8.517-1.08-9.772-5.218a7.837 7.837 0 0 1 5.223-9.772c29.48-8.948 78.625-7.226 108.15 10.307 3.722 2.208 4.94 7.017 2.734 10.733-2.2 3.722-7.02 4.945-10.73 2.734z"
       />
     </svg>
   );
 }
 
-function AppleMark() {
+/**
+ * Apple Music glyph — the rounded-square mark with the red-pink gradient
+ * and white note shape. Based on Apple's Marketing Resources guidelines
+ * for services; usable to indicate connection with the Apple Music
+ * service as long as colors and proportions are preserved.
+ */
+function AppleMark({ size = 20 }: { size?: number }) {
+  const gradId = 'vs-apple-grad';
   return (
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden>
+      <defs>
+        <linearGradient id={gradId} x1="50%" y1="0%" x2="50%" y2="100%">
+          <stop offset="0%" stopColor="#FA233B" />
+          <stop offset="100%" stopColor="#FB5C74" />
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="9.5" fill={`url(#${gradId})`} />
       <path
-        d="M6.5 12.2V4.6l6.2-1.4v7.4"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-      <ellipse cx="5.2" cy="12.2" rx="1.7" ry="1.4" fill="currentColor" />
-      <ellipse
-        cx="11.3"
-        cy="10.6"
-        rx="1.7"
-        ry="1.4"
-        fill="currentColor"
-        opacity="0.85"
+        fill="#fff"
+        d="M27.9 10.14a1.18 1.18 0 0 0-.52-.78 1.55 1.55 0 0 0-1.06-.2c-.22.03-.45.08-.67.12l-9.83 1.98c-.28.06-.53.13-.77.27a1.15 1.15 0 0 0-.54.78c-.03.17-.04.34-.04.51V25.5l-.03.05a.33.33 0 0 1-.24.09c-.56.06-1.13.1-1.69.17a4.3 4.3 0 0 0-1.5.43c-.92.45-1.47 1.2-1.47 2.24 0 .9.4 1.61 1.07 2.13.68.52 1.48.72 2.33.7.52 0 1.03-.1 1.51-.32.76-.35 1.23-.95 1.35-1.78.03-.18.04-.36.04-.55V17.96c0-.34.06-.42.39-.5l1.29-.26 6.57-1.36c.23-.04.46-.09.69-.12a.47.47 0 0 1 .51.4c.02.14.03.28.03.43v5.82l-.03.05a.33.33 0 0 1-.24.09c-.56.06-1.13.1-1.69.17a4.3 4.3 0 0 0-1.5.43c-.92.45-1.47 1.2-1.47 2.24 0 .9.4 1.61 1.07 2.13.68.52 1.48.72 2.33.7.52 0 1.03-.1 1.51-.32.76-.35 1.23-.95 1.35-1.78.03-.18.04-.36.04-.55V11.15c0-.34-.02-.68-.09-1.01z"
       />
     </svg>
   );
 }
 
-function StatusDot({
+/**
+ * Single provider row: shows its logo, a label that reflects the current
+ * connection status, and an action slot on the right. When connected,
+ * the action swaps from "Sign in" → "Disconnect" so there's always a way
+ * both IN and OUT of the connection.
+ */
+function ProviderTile({
+  provider,
   status,
-  size = 'sm',
+  onConnect,
+  onDisconnect,
 }: {
+  provider: 'spotify' | 'apple';
   status: Status;
-  size?: 'sm' | 'lg';
+  onConnect: () => void;
+  onDisconnect: () => void;
 }) {
-  const dim = size === 'lg' ? 'h-2 w-2' : 'h-1.5 w-1.5';
+  const isSpotify = provider === 'spotify';
+  const displayName = isSpotify ? 'Spotify' : 'Apple Music';
+  const subtle =
+    status === 'linked'
+      ? 'Connected'
+      : status === 'busy'
+        ? isSpotify
+          ? 'Redirecting to Spotify…'
+          : 'Opening Apple Music…'
+        : 'Not connected';
+
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-2xl border px-3 py-3 transition-colors ${
+        status === 'linked'
+          ? 'border-white/15 bg-white/[0.04]'
+          : 'border-white/10 bg-white/[0.02]'
+      }`}
+    >
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center">
+        {isSpotify ? <SpotifyMark size={28} /> : <AppleMark size={28} />}
+      </div>
+
+      <div className="min-w-0 flex-1 text-left">
+        <div className="flex items-center gap-2">
+          <span className="text-[14px] font-medium text-white">
+            {displayName}
+          </span>
+          <StatusPill status={status} />
+        </div>
+        <span className="label-caps block truncate text-[var(--fg-mute)]">
+          {subtle}
+        </span>
+      </div>
+
+      {status === 'linked' ? (
+        <button
+          type="button"
+          onClick={onDisconnect}
+          className="label-caps shrink-0 rounded-full border border-white/15 bg-white/[0.03] px-3 py-1.5 text-white/80 transition-colors hover:bg-white/[0.08] hover:text-white"
+          aria-label={`Disconnect ${displayName}`}
+        >
+          Disconnect
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={onConnect}
+          disabled={status === 'busy'}
+          className="label-caps shrink-0 rounded-full bg-white px-3 py-1.5 text-black transition-colors hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-70"
+          aria-label={`Connect ${displayName}`}
+        >
+          {status === 'busy' ? 'Connecting…' : 'Connect'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: Status }) {
   if (status === 'linked') {
     return (
-      <span className={`relative flex ${dim}`}>
-        <span
-          className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60"
-          style={{ background: 'rgba(188, 220, 255, 0.5)' }}
-        />
-        <span
-          className={`relative inline-flex ${dim} rounded-full bg-[var(--ice)]`}
-        />
+      <span className="inline-flex items-center gap-1 rounded-full bg-[rgba(188,220,255,0.12)] px-1.5 py-[1px]">
+        <span className="relative flex h-1.5 w-1.5">
+          <span
+            className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60"
+            style={{ background: 'rgba(188, 220, 255, 0.5)' }}
+          />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--ice)]" />
+        </span>
+        <span className="mono text-[9.5px] font-medium tracking-[0.14em] uppercase text-[var(--ice)]">
+          Live
+        </span>
       </span>
     );
   }
   if (status === 'busy') {
     return (
-      <span className={`relative flex ${dim}`}>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/50 opacity-70" />
-        <span className={`relative inline-flex ${dim} rounded-full bg-white/70`} />
+      <span className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] px-1.5 py-[1px]">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/50 opacity-70" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white/70" />
+        </span>
+        <span className="mono text-[9.5px] font-medium tracking-[0.14em] uppercase text-white/70">
+          Syncing
+        </span>
       </span>
     );
   }
-  return <span className={`inline-flex ${dim} rounded-full bg-white/20`} />;
-}
-
-function spotifyLabel(s: Status) {
-  if (s === 'linked') return 'Spotify linked';
-  if (s === 'busy') return 'Redirecting to Spotify…';
-  return 'Sign in with Spotify';
-}
-
-function appleLabel(s: Status) {
-  if (s === 'linked') return 'Apple Music linked';
-  if (s === 'busy') return 'Opening Apple Music…';
-  return 'Sign in with Apple Music';
+  return null;
 }
 
 function friendlyAppleError(err: unknown): string {
