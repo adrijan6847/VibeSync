@@ -40,3 +40,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# editor swap files
+*.swp
+
+# Claude Code harness (worktrees, local settings)
+.claude/

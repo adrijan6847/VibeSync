@@ -28,6 +28,12 @@ type Session = {
   phaseEndsAt: number | null;
   beatCounter: number;
   createdAt: number;
+  /**
+   * Wall-clock ms of the moment participants.size transitioned to 0.
+   * Null while the room has people in it. Drives the GC sweep so rooms
+   * live 60s past *emptying* (host-reconnect grace), not 60s past creation.
+   */
+  lastEmptyAt: number | null;
 };
 
 const sessions = new Map<string, Session>();
@@ -68,6 +74,7 @@ function makeSession(hostId: string): Session {
     phaseEndsAt: null,
     beatCounter: 0,
     createdAt: Date.now(),
+    lastEmptyAt: null,
   };
   sessions.set(s.code, s);
   return s;
@@ -117,6 +124,9 @@ function detachFromSession(
   }
   if (s.participants.size > 0) {
     io.to(code).emit('state', toClientState(s));
+  } else {
+    s.hostId = null;
+    s.lastEmptyAt = Date.now();
   }
 }
 
@@ -125,8 +135,11 @@ export function createEngine(io: Server): void {
     const now = Date.now();
     for (const s of sessions.values()) {
       if (s.participants.size === 0) {
-        // Garbage collect empty sessions older than 60s
-        if (now - s.createdAt > 60_000) {
+        // 60s grace from the moment the room emptied (not from creation)
+        // lets a disconnected host reconnect without losing their room.
+        // lastEmptyAt is set by detachFromSession and the disconnect
+        // handler whenever participants transitions to 0.
+        if (s.lastEmptyAt !== null && now - s.lastEmptyAt > 60_000) {
           sessions.delete(s.code);
           disposeMusicSession(s.code);
         }
@@ -259,6 +272,8 @@ export function createEngine(io: Server): void {
         };
         s.participants.set(socket.id, p);
         if (!s.hostId) s.hostId = socket.id;
+        // Room is no longer empty — cancel any pending GC.
+        s.lastEmptyAt = null;
         socket.join(s.code);
         joinedCode = s.code;
         cb({ ok: true, state: toClientState(s), you: p });
@@ -315,8 +330,11 @@ export function createEngine(io: Server): void {
         s.hostId = next ? next.id : null;
       }
       if (s.participants.size === 0) {
-        // leave around briefly in case host reconnects
+        // Leave around briefly in case host reconnects. lastEmptyAt arms
+        // the sweep at src/server/sessions.ts createEngine to GC this room
+        // (and its music state) 60s from now if nobody rejoins.
         s.hostId = null;
+        s.lastEmptyAt = Date.now();
       } else {
         io.to(s.code).emit('state', toClientState(s));
       }

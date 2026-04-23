@@ -21,8 +21,10 @@ import type {
 import type {
   MusicProvider,
   PlaybackStateListener,
+  ResolveResult,
   Unsubscribe,
 } from './MusicProvider';
+import { rankCandidates, type Candidate } from './matching';
 import { registerAdapter } from './index';
 
 const SDK_SRC = 'https://sdk.scdn.co/spotify-player.js';
@@ -128,6 +130,16 @@ function friendlyAuthError(_raw: string | undefined): string {
   return 'Spotify rejected the session. Please reconnect your account.';
 }
 
+// Dev-only breadcrumb for resolveTrack strategies. Helps diff against
+// "it didn't work for X" reports without noise in production logs.
+function logVia(
+  track: { title: string; artist: string },
+  via: 'direct_uri' | 'title_artist' | 'isrc',
+): void {
+  if (process.env.NODE_ENV !== 'development') return;
+  console.debug(`[spotify.resolve] "${track.title}" / ${track.artist} via ${via}`);
+}
+
 let sdkPromise: Promise<SpotifySDK> | null = null;
 function loadSDK(): Promise<SpotifySDK> {
   if (sdkPromise) return sdkPromise;
@@ -167,6 +179,11 @@ class SpotifyAdapter implements MusicProvider {
   private paused = true;
   private lastPositionMs = 0;
   private lastPositionAt = 0; // performance.now() when lastPositionMs was reported
+
+  // Handle for the keep-alive interval. Null when not running. Spotify
+  // Connect reaps idle devices after ~30 min; this pings every 20 min
+  // while paused to stay inside that window.
+  private keepAliveHandle: number | null = null;
 
   async authenticate(): Promise<void> {
     this.token = readToken();
@@ -259,11 +276,15 @@ class SpotifyAdapter implements MusicProvider {
     // phone or desktop app that was previously active — the UI clock
     // ticks but the user hears nothing.
     await this.transferPlayback().catch(() => {});
+
+    // Kick off the idle keep-alive now that the device is live. Stopped
+    // on dispose/signOut; restarted on re-authenticate.
+    this.startKeepAlive();
   }
 
   private async transferPlayback(): Promise<void> {
     if (!this.token || !this.deviceId) return;
-    await fetch('https://api.spotify.com/v1/me/player', {
+    const res = await fetch('https://api.spotify.com/v1/me/player', {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -271,31 +292,149 @@ class SpotifyAdapter implements MusicProvider {
       },
       body: JSON.stringify({ device_ids: [this.deviceId], play: false }),
     });
+    // Throw on non-ok so reactivateDevice's path-1 try/catch can
+    // distinguish "transfer succeeded, device is alive" from "transfer
+    // failed, fall through to hard reconnect". Pre-existing callers use
+    // .catch(() => {}) so this doesn't propagate to them.
+    if (!res.ok && res.status !== 204) {
+      throw new Error(`Spotify transfer failed: ${res.status}`);
+    }
+  }
+
+  /**
+   * Proactive keep-alive. While the adapter is authenticated and
+   * paused, ping /v1/me/player every 20 min to prevent Spotify Connect
+   * from reaping our device. Active playback naturally keeps the
+   * device alive, so we skip the ping when not paused.
+   *
+   * 20 min is well inside the ~30 min reap window and polite to
+   * Spotify's rate limiter.
+   */
+  private startKeepAlive(): void {
+    this.stopKeepAlive();
+    this.keepAliveHandle = window.setInterval(
+      () => {
+        if (!this.deviceId || !this.token) return;
+        if (!this.paused) return;
+        fetch('https://api.spotify.com/v1/me/player', {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ device_ids: [this.deviceId], play: false }),
+        }).catch(() => {
+          // Non-fatal — the reactive retry on 404 catches it if this fails.
+        });
+      },
+      20 * 60 * 1000,
+    );
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveHandle !== null) {
+      window.clearInterval(this.keepAliveHandle);
+      this.keepAliveHandle = null;
+    }
   }
 
   isAuthenticated(): boolean {
     return Boolean(this.token && this.deviceId);
   }
 
-  async resolveTrack(track: CanonicalTrack): Promise<ProviderTrackHandle> {
-    let uri: string | undefined = track.providerIds.spotify;
-
-    // Guest path: a host on Apple Music broadcast a track with only
-    // { apple: ... } in providerIds. We still have the ISRC (track.id),
-    // so we can ask Spotify for an equivalent recording.
-    if (!uri) {
-      uri = (await this.lookupByIsrc(track.id)) ?? undefined;
-      if (!uri) {
-        throw new Error(
-          `Spotify: no track for ISRC ${track.id} in this account's market`,
-        );
-      }
+  async resolveTrack(track: CanonicalTrack): Promise<ResolveResult> {
+    // 1. Direct URI — host was on Spotify; guest reuses the URI without
+    //    any network round-trip.
+    const directUri = track.providerIds.spotify;
+    if (directUri) {
+      logVia(track, 'direct_uri');
+      return {
+        ok: true,
+        via: 'direct_uri',
+        handle: {
+          canonicalTrackId: track.id,
+          provider: 'spotify',
+          providerTrackId: directUri,
+        },
+      };
     }
+
+    // 2 + 3. Race title+artist search against ISRC lookup. ISRCs drift
+    //        across releases (same recording → different ISRC on single
+    //        vs album), so title+artist is the primary cross-provider
+    //        bridge — ISRC is a hint, not the source of truth.
+    const [byTitleArtist, byIsrc] = await Promise.allSettled([
+      this.searchByTitleArtist(track),
+      this.lookupByIsrc(track.id),
+    ]);
+
+    if (byTitleArtist.status === 'fulfilled' && byTitleArtist.value) {
+      logVia(track, 'title_artist');
+      return {
+        ok: true,
+        via: 'title_artist',
+        handle: {
+          canonicalTrackId: track.id,
+          provider: 'spotify',
+          providerTrackId: byTitleArtist.value,
+        },
+      };
+    }
+    if (byIsrc.status === 'fulfilled' && byIsrc.value) {
+      logVia(track, 'isrc');
+      return {
+        ok: true,
+        via: 'isrc',
+        handle: {
+          canonicalTrackId: track.id,
+          provider: 'spotify',
+          providerTrackId: byIsrc.value,
+        },
+      };
+    }
+
     return {
-      canonicalTrackId: track.id,
-      provider: 'spotify',
-      providerTrackId: uri,
+      ok: false,
+      reason: 'not_in_catalog',
+      message: `Can't play this track on Spotify. Sitting this one out.`,
     };
+  }
+
+  /**
+   * Title+artist lookup bridge. Uses Spotify's /v1/search with
+   * structured `track:"…" artist:"…"` fields, then runs rankCandidates
+   * with a duration-weighted match predicate. Returns the best URI or
+   * null.
+   */
+  private async searchByTitleArtist(
+    track: CanonicalTrack,
+  ): Promise<string | null> {
+    if (!this.token) return null;
+    const q = `track:"${track.title}" artist:"${track.artist}"`;
+    const url =
+      `https://api.spotify.com/v1/search?type=track&limit=10` +
+      `&q=${encodeURIComponent(q)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!res.ok) return null;
+    const body: SpotifySearchResponse = await res.json();
+    const items = body.tracks?.items ?? [];
+    const candidates: Candidate[] = items.map((t) => ({
+      title: t.name,
+      artist: t.artists.map((a) => a.name).join(', '),
+      durationMs: t.duration_ms,
+      providerTrackId: t.uri,
+    }));
+    const best = rankCandidates(
+      {
+        title: track.title,
+        artist: track.artist,
+        durationMs: track.durationMs,
+      },
+      candidates,
+    );
+    return best?.providerTrackId ?? null;
   }
 
   async search(query: string, limit = 8): Promise<CanonicalTrack[]> {
@@ -383,35 +522,16 @@ class SpotifyAdapter implements MusicProvider {
     // route there instead of to our SDK.
     await this.transferPlayback().catch(() => {});
 
-    const url =
-      `https://api.spotify.com/v1/me/player/play` +
-      `?device_id=${encodeURIComponent(this.deviceId)}`;
-    const init: RequestInit = {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        uris: [handle.providerTrackId],
-        position_ms: Math.max(0, Math.floor(positionMs)),
-      }),
-    };
+    let res = await this.sendPlay(handle, positionMs);
 
-    let res: Response;
-    try {
-      res = await fetch(url, init);
-    } catch (err) {
-      // "Failed to fetch" = TypeError from the network layer (DNS,
-      // offline, blocked). Retry once before surfacing.
-      await new Promise((r) => setTimeout(r, 400));
-      try {
-        res = await fetch(url, init);
-      } catch (err2) {
-        const msg = err2 instanceof Error ? err2.message : String(err2);
-        throw new Error(`Spotify play network error: ${msg}`);
-      }
+    // 404 on this endpoint is functionally always "device not found" —
+    // Spotify reaped our Connect device. Reactivate and retry exactly
+    // once. Retry-counts above 1 hide real failures.
+    if (res.status === 404) {
+      await this.reactivateDevice();
+      res = await this.sendPlay(handle, positionMs);
     }
+
     if (!res.ok && res.status !== 204) {
       const text = await res.text().catch(() => '');
       throw new Error(`Spotify play failed: ${res.status} ${text}`);
@@ -421,6 +541,99 @@ class SpotifyAdapter implements MusicProvider {
     this.lastPositionMs = positionMs;
     this.lastPositionAt = performance.now();
     this.emit();
+  }
+
+  /**
+   * Issue the /v1/me/player/play PUT. Retries once on network-level
+   * TypeErrors (offline, DNS blip) — HTTP-level errors are returned as
+   * a Response for the caller to classify.
+   */
+  private async sendPlay(
+    handle: ProviderTrackHandle,
+    positionMs: number,
+  ): Promise<Response> {
+    const url =
+      `https://api.spotify.com/v1/me/player/play` +
+      `?device_id=${encodeURIComponent(this.deviceId ?? '')}`;
+    const init: RequestInit = {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${this.token ?? ''}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        uris: [handle.providerTrackId],
+        position_ms: Math.max(0, Math.floor(positionMs)),
+      }),
+    };
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        return await fetch(url, init);
+      } catch (err2) {
+        const msg = err2 instanceof Error ? err2.message : String(err2);
+        throw new Error(`Spotify play network error: ${msg}`);
+      }
+    }
+  }
+
+  /**
+   * Two-path device recovery.
+   *
+   *   Path 1 — transfer: Spotify often just "forgot" the device was
+   *     active; re-transferring nudges it back into the active set.
+   *     ~200-500 ms, idempotent, handles the common case.
+   *
+   *   Path 2 — reconnect: only if transfer itself fails. The SDK
+   *     thinks it's still connected but Spotify has actually purged
+   *     the device record; disconnect + connect forces a fresh
+   *     registration. ~2 s.
+   */
+  private async reactivateDevice(): Promise<void> {
+    if (process.env.NODE_ENV === 'development') {
+      console.debug('[spotify.reactivateDevice] path 1: transfer');
+    }
+    try {
+      await this.transferPlayback();
+      // Give Spotify a beat to acknowledge the transfer server-side.
+      await new Promise((r) => setTimeout(r, 250));
+      return;
+    } catch {
+      // fall through to path 2
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.debug('[spotify.reactivateDevice] path 2: reconnect');
+    }
+    if (!this.player) {
+      throw new Error('spotify_reconnect_failed_no_player');
+    }
+    const oldId = this.deviceId;
+    this.deviceId = null;
+    this.player.disconnect();
+
+    const ok = await this.player.connect();
+    if (!ok) throw new Error('Spotify player reconnect failed');
+
+    // Wait for the 'ready' listener to populate this.deviceId.
+    const deadline = performance.now() + 5000;
+    while (!this.deviceId && performance.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!this.deviceId) {
+      throw new Error('Spotify device did not re-register after reconnect');
+    }
+    if (this.deviceId === oldId) {
+      // Same id came back — Spotify didn't actually reap; something
+      // deeper is wrong. Let the caller's retry fail honestly rather
+      // than masking it.
+      return;
+    }
+
+    await this.player.activateElement().catch(() => {});
+    await this.transferPlayback().catch(() => {});
   }
 
   async pause(): Promise<void> {
@@ -456,6 +669,7 @@ class SpotifyAdapter implements MusicProvider {
 
   async dispose(): Promise<void> {
     this.listeners.clear();
+    this.stopKeepAlive();
     if (this.player) {
       this.player.disconnect();
       this.player = null;
@@ -464,6 +678,7 @@ class SpotifyAdapter implements MusicProvider {
   }
 
   async signOut(): Promise<void> {
+    this.stopKeepAlive();
     if (this.player) {
       this.player.disconnect();
       this.player = null;

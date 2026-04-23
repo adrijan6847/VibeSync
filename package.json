@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:tunnel": "ngrok http --url=patchwork-tidiness-delicious.ngrok-free.dev 3000",
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts"
   },

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { extractPalette, type Palette } from '@/lib/palette';
 import { getSocket } from '@/lib/socket';
 import '@/music/adapters/register';
 import { getAdapter, hasAdapter } from './adapters';
@@ -27,6 +28,23 @@ export type MusicSnapshot = {
   provider: ProviderId | null;
   adapterReady: boolean;
   adapterError: string | null;
+  /** 3-color palette extracted from the current track's cover art. null
+   *  while none is loaded or on CORS/decode failure. */
+  palette: Palette | null;
+  /** 0..1 normalized playhead position. Holds last value while paused;
+   *  resets to 0 on track change. */
+  playheadPhase: number;
+  /** Live playhead in ms. Updated ≤ 4 Hz (set only when Δ ≥ 250 ms).
+   *  Holds last value while paused; resets to 0 on track change. */
+  positionMs: number;
+  /** |target − adapter.getCurrentPositionMs()| from the drift interval,
+   *  surfaced for the SYNCED indicator. Updated ≤ 2 Hz. */
+  driftMs: number;
+  /** Populated when the current provider can't play nowPlaying (catalog
+   *  miss after trying direct URI, title+artist, and ISRC lookup). Not
+   *  an error — an expected outcome; the UI shows a calm banner. Clears
+   *  on the next track swap. */
+  trackUnavailable: { reason: 'not_in_catalog'; message: string } | null;
 };
 
 export type MusicActions = {
@@ -59,10 +77,18 @@ export function useMusicSession(
   const [provider, setProvider] = useState<ProviderId | null>(null);
   const [adapterReady, setAdapterReady] = useState(false);
   const [adapterError, setAdapterError] = useState<string | null>(null);
+  const [palette, setPalette] = useState<Palette | null>(null);
+  const [playheadPhase, setPlayheadPhase] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
+  const [driftMs, setDriftMs] = useState(0);
+  const [trackUnavailable, setTrackUnavailable] = useState<
+    { reason: 'not_in_catalog'; message: string } | null
+  >(null);
 
   const adapterRef = useRef<MusicProvider | null>(null);
   const clockOffsetRef = useRef(clockOffsetMs);
   const clockRef = useRef(clock);
+  const lastDriftSetRef = useRef(0);
 
   useEffect(() => {
     clockOffsetRef.current = clockOffsetMs;
@@ -95,8 +121,24 @@ export function useMusicSession(
 
     (async () => {
       try {
-        const handle = await adapter.resolveTrack(nowPlaying);
+        const result = await adapter.resolveTrack(nowPlaying);
         if (cancelled) return;
+
+        if (!result.ok) {
+          // Expected outcome — this provider doesn't have the track in
+          // its catalog for this account's market. No throw, no console
+          // noise: the UI surfaces a banner and the other participants
+          // still hear the music.
+          setTrackUnavailable({
+            reason: result.reason,
+            message: result.message,
+          });
+          await adapter.pause().catch(() => {});
+          return;
+        }
+
+        setTrackUnavailable(null);
+        const handle = result.handle;
         if (clock.paused) {
           await adapter.pause().catch(() => {});
           const target = clock.positionAtStartMs;
@@ -122,11 +164,94 @@ export function useMusicSession(
     };
   }, [clock.revision, clock.paused, nowPlaying?.id, adapterReady]);
 
+  // Extract a 3-color palette from the current cover art. Module-level
+  // cache in palette.ts means a track swap back to a previously-seen
+  // cover is free; first hit is a single 32×32 pixel-bucket pass.
+  useEffect(() => {
+    const url = nowPlaying?.artworkUrl;
+    if (!url) {
+      setPalette(null);
+      return;
+    }
+    let cancelled = false;
+    extractPalette(url).then((p) => {
+      if (!cancelled) setPalette(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nowPlaying?.artworkUrl]);
+
+  // Reset playhead state on track change so the next track starts at 0.
+  // Also clears the catalog-miss banner — the new track gets a fresh
+  // resolve attempt.
+  useEffect(() => {
+    setPlayheadPhase(0);
+    setPositionMs(0);
+    setDriftMs(0);
+    setTrackUnavailable(null);
+  }, [nowPlaying?.id]);
+
+  // RAF playhead in ms. Throttled to Δ ≥ 250 ms so we set React state
+  // ~4 times per second — enough for a smooth progress bar, cheap on
+  // render cost. Pause / track change release the RAF.
+  useEffect(() => {
+    if (!nowPlaying || clock.paused) return;
+    let raf = 0;
+    let last = -Infinity;
+    const loop = () => {
+      const pos = derivePositionMs(
+        clockRef.current,
+        Date.now(),
+        clockOffsetRef.current,
+      );
+      if (Math.abs(pos - last) >= 250) {
+        last = pos;
+        setPositionMs(pos);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [nowPlaying?.id, clock.paused]);
+
+  // RAF-driven playhead phase (0..1). Throttled to ≥0.005 steps — ~200
+  // React updates across a full track, plenty for a slow "breathing"
+  // modulator. Pauses freeze the value in place.
+  useEffect(() => {
+    const duration = nowPlaying?.durationMs;
+    if (!duration || clock.paused) return;
+    let raf = 0;
+    let last = -1;
+    const loop = () => {
+      const pos = derivePositionMs(
+        clockRef.current,
+        Date.now(),
+        clockOffsetRef.current,
+      );
+      const p = Math.max(0, Math.min(1, pos / duration));
+      if (Math.abs(p - last) >= 0.005) {
+        last = p;
+        setPlayheadPhase(p);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [nowPlaying?.id, nowPlaying?.durationMs, clock.paused]);
+
   // Drift correction while playing.
   useEffect(() => {
     const adapter = adapterRef.current;
     if (!adapter || !adapterReady || !nowPlaying || clock.paused) return;
     const id = window.setInterval(() => {
+      // Background tabs throttle timers unevenly and the audio is almost
+      // certainly muted anyway — drift corrections while hidden are
+      // noise that ties up the adapter for no user-visible benefit. Skip
+      // the body (don't clear the interval: re-creating it forces
+      // re-entry into the warm-seek grace window below).
+      if (typeof document !== 'undefined' && document.hidden) return;
+
       // Skip drift correction during the server's scheduled-start grace
       // window. The canonical clock is intentionally holding at
       // positionAtStartMs while adapters warm up, so the adapter's
@@ -141,7 +266,15 @@ export function useMusicSession(
         clockOffsetRef.current,
       );
       const actual = adapter.getCurrentPositionMs();
-      if (Math.abs(target - actual) > DRIFT_NUDGE_MS) {
+      const drift = Math.abs(target - actual);
+      // Surface drift at ≤ 2 Hz so the SYNCED badge can color-code itself
+      // without thrashing React on every drift check.
+      const nowWall = Date.now();
+      if (nowWall - lastDriftSetRef.current > 500) {
+        lastDriftSetRef.current = nowWall;
+        setDriftMs(drift);
+      }
+      if (drift > DRIFT_NUDGE_MS) {
         adapter.seek(target).catch(() => {});
       }
     }, DRIFT_INTERVAL_MS);
@@ -207,6 +340,11 @@ export function useMusicSession(
     provider,
     adapterReady,
     adapterError,
+    palette,
+    playheadPhase,
+    positionMs,
+    driftMs,
+    trackUnavailable,
     selectProvider,
     load,
     play,

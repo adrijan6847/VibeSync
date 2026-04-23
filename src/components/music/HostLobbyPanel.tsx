@@ -18,7 +18,13 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { SuggestiveSearch } from './SuggestiveSearch';
 import type { MusicActions, MusicSnapshot } from '@/music/useMusicSession';
 import type { Participant } from '@/lib/types';
+import {
+  getAdapter,
+  providerDisplayName,
+  readAndClearPendingProvider,
+} from '@/music/adapters';
 import { startSpotifyLogin } from '@/music/adapters/spotify-auth';
+import type { ProviderId } from '@/music/types';
 
 type Props = {
   music: MusicSnapshot & MusicActions;
@@ -27,15 +33,18 @@ type Props = {
 };
 
 export function HostLobbyPanel({ music, participants, youId }: Props) {
-  // Fallback safety net — /sync stashes a pending provider before
-  // navigating, but if that flag was lost (private-mode sessionStorage,
-  // manual refresh, etc.) kick off Spotify here so the host never sees
-  // a blank panel.
+  // Provider handoff from /sync. Priority:
+  //   1. pending-provider flag stashed right before navigation (covers
+  //      "linked both, preferred one" and the OAuth-return hop)
+  //   2. whichever adapter reports isAuthenticated() — supports the
+  //      Apple-only or Spotify-only host who only signed into one side
+  //   3. spotify as a last-resort nudge so the host still sees UI
+  //      (ConnectUI / error state below) instead of a blank panel
   useEffect(() => {
     if (music.provider) return;
-    music.selectProvider('spotify').catch(() => {
-      // MusicPanel guests can still fall back to the picker by design;
-      // for host we simply surface the error in the status line below.
+    const target = resolveHostProvider();
+    music.selectProvider(target).catch(() => {
+      // Error is surfaced through the adapterError branch below.
     });
     // intentionally one-shot — any subsequent provider change is user-driven
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -59,7 +68,11 @@ export function HostLobbyPanel({ music, participants, youId }: Props) {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <SpotifyReconnect message={music.adapterError ?? ''} />
+            <ProviderReconnect
+              provider={music.provider}
+              message={music.adapterError ?? ''}
+              onReconnect={() => music.selectProvider(music.provider ?? resolveHostProvider())}
+            />
           </motion.div>
         ) : ready ? (
           <motion.div
@@ -103,21 +116,50 @@ export function HostLobbyPanel({ music, participants, youId }: Props) {
   );
 }
 
-function SpotifyReconnect({ message }: { message: string }) {
+/**
+ * Provider-agnostic reconnect affordance. Spotify needs a full OAuth
+ * redirect (startSpotifyLogin leaves the page); Apple re-authenticates
+ * in place via MusicKit. `onReconnect` is an optional post-success hook
+ * the caller uses to re-run selectProvider() on the in-place flow.
+ */
+export function ProviderReconnect({
+  provider,
+  message,
+  onReconnect,
+}: {
+  provider: ProviderId | null;
+  message: string;
+  onReconnect?: () => void | Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
+  const targetProvider = provider ?? resolveHostProvider();
+  const label = providerDisplayName(targetProvider).toLowerCase();
+
   const reconnect = async () => {
     if (busy) return;
     setBusy(true);
     try {
-      const returnTo =
-        typeof window !== 'undefined'
-          ? window.location.pathname + window.location.search
-          : '/';
-      await startSpotifyLogin(returnTo);
+      if (targetProvider === 'spotify') {
+        const returnTo =
+          typeof window !== 'undefined'
+            ? window.location.pathname + window.location.search
+            : '/';
+        // Navigates away; setBusy(false) only matters if the redirect
+        // never happens (e.g. startSpotifyLogin threw before redirect).
+        await startSpotifyLogin(returnTo);
+        return;
+      }
+      // Apple / any in-place auth: re-run authenticate() then let the
+      // caller retrigger selectProvider() so adapterReady flips back on.
+      await getAdapter(targetProvider).authenticate();
+      await onReconnect?.();
     } catch {
+      // swallow — adapterError stays visible so user can retry
+    } finally {
       setBusy(false);
     }
   };
+
   return (
     <div className="flex flex-col gap-2 px-1 py-1">
       <span className="text-[13px] text-white/85">{message}</span>
@@ -127,10 +169,31 @@ function SpotifyReconnect({ message }: { message: string }) {
         disabled={busy}
         className="label-caps self-start rounded-full border border-[var(--stroke-strong)] px-3 py-1.5 text-white/90 transition-colors duration-180 hover:bg-white/[0.06] disabled:opacity-60"
       >
-        {busy ? 'reconnecting…' : 'reconnect spotify'}
+        {busy ? 'reconnecting…' : `reconnect ${label}`}
       </button>
     </div>
   );
+}
+
+/**
+ * Shared host provider resolver — checked both on first mount and when
+ * the reconnect button fires without a known provider. Keeps the two
+ * call sites in lockstep.
+ */
+function resolveHostProvider(): ProviderId {
+  const pending = typeof window !== 'undefined' ? readAndClearPendingProvider() : null;
+  if (pending) return pending;
+  // Probe in priority order. Adapter factories are cheap; authenticate()
+  // is deferred, so isAuthenticated() just checks cached-token state.
+  const candidates: ProviderId[] = ['spotify', 'apple'];
+  for (const id of candidates) {
+    try {
+      if (getAdapter(id).isAuthenticated()) return id;
+    } catch {
+      // adapter not registered — skip
+    }
+  }
+  return 'spotify';
 }
 
 function GuestRoster({

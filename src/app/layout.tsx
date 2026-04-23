@@ -61,7 +61,10 @@ export default function RootLayout({
       lang="en"
       className={`${sans.variable} ${display.variable} ${mono.variable} h-full`}
     >
-      <body className="min-h-full">{children}</body>
+      {/* suppressHydrationWarning tolerates browser extensions (Grammarly,
+          password managers, etc.) that inject data-* attributes on <body>
+          before React hydrates. */}
+      <body className="min-h-full" suppressHydrationWarning>{children}</body>
     </html>
   );
 }

@@ -14,6 +14,25 @@ import { useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 
+// three r183 deprecated THREE.Clock in favor of THREE.Timer, which spams
+// the dev console each time R3F instantiates its internal Clock (once per
+// Canvas mount). Our own code uses Timer — this filter silences only that
+// specific deprecation while leaving every other three.js message on the
+// native console. Keep until @react-three/fiber migrates upstream.
+if (typeof window !== 'undefined') {
+  THREE.setConsoleFunction((type, message, ...params) => {
+    if (
+      typeof message === 'string' &&
+      message.startsWith('THREE.Clock: This module has been deprecated.')
+    ) {
+      return;
+    }
+    const fn = (console as unknown as Record<string, (...a: unknown[]) => void>)[type];
+    if (typeof fn === 'function') fn(message, ...params);
+    else console.log(message, ...params);
+  });
+}
+
 type UniformDef = {
   value: number | number[] | number[][];
   type: 'uniform1f' | 'uniform1i' | 'uniform1fv' | 'uniform3fv';
@@ -162,12 +181,17 @@ function DotMatrix({
 function ShaderMesh({ source, uniforms }: { source: string; uniforms: Uniforms }) {
   const { size } = useThree();
   const ref = useRef<THREE.Mesh>(null);
+  // THREE.Timer is the r183+ replacement for THREE.Clock (Clock's
+  // constructor emits a deprecation warning). Timer.update() advances
+  // internal state once per frame, then getElapsed() returns seconds.
+  const timer = useMemo(() => new THREE.Timer(), []);
 
-  useFrame(({ clock }) => {
+  useFrame(() => {
     const mesh = ref.current;
     if (!mesh) return;
+    timer.update();
     const mat = mesh.material as THREE.ShaderMaterial;
-    mat.uniforms.u_time.value = clock.getElapsedTime();
+    mat.uniforms.u_time.value = timer.getElapsed();
   });
 
   const material = useMemo(() => {

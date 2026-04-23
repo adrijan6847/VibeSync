@@ -15,7 +15,7 @@
  * on arrival, reverse plays when the user locks the code in.
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -82,37 +82,56 @@ function SyncPage({ className }: { className?: string }) {
 
   function mintCode() {
     if (mintingCode) return;
+    setError(null);
     setMintingCode(true);
     const s = getSocket();
     if (!s.connected) s.connect();
 
     const onReady = () => {
-      s.emit('session:create', {}, (r: CreateResponse) => {
-        const letters = (r.code ?? '').toUpperCase().slice(0, ROOM_CODE_LENGTH);
-        const padded = letters.padEnd(ROOM_CODE_LENGTH, ' ').split('');
-        padded.forEach((ch, i) => {
-          window.setTimeout(() => {
-            setCode((prev) => {
-              const next = [...prev];
-              next[i] = ch === ' ' ? '' : ch;
-              return next;
-            });
-          }, 180 * i);
-        });
-        setStep('code');
-      });
+      // socket.io's .timeout() wraps the ack so the callback fires with
+      // `(err, response)` — err is truthy if the ack doesn't arrive in time.
+      // Without this, a silent server stall leaves "Minting your room…" spinning.
+      s.timeout(8000).emit(
+        'session:create',
+        {},
+        (err: Error | null, r?: CreateResponse) => {
+          if (err || !r?.code) {
+            setMintingCode(false);
+            setError(
+              err
+                ? 'Couldn’t reach the session server. Tap "Open your room" to retry.'
+                : 'The session server didn’t return a room code. Tap to retry.',
+            );
+            return;
+          }
+          setMintingCode(false);
+          const letters = r.code.toUpperCase().slice(0, ROOM_CODE_LENGTH);
+          const padded = letters.padEnd(ROOM_CODE_LENGTH, ' ').split('');
+          padded.forEach((ch, i) => {
+            window.setTimeout(() => {
+              setCode((prev) => {
+                const next = [...prev];
+                next[i] = ch === ' ' ? '' : ch;
+                return next;
+              });
+            }, 180 * i);
+          });
+          setStep('code');
+        },
+      );
     };
 
     if (s.connected) onReady();
     else s.once('connect', onReady);
   }
 
-  // Both providers linked → mint a session and roll to the code reveal.
+  // First provider linked → mint a session and roll to the code reveal.
   // Only fires once per page load; Back from the code screen does not
-  // re-trigger the mint.
+  // re-trigger the mint. Hosting only requires one provider — users can
+  // sync with either Spotify or Apple Music (or both for multi-source rooms).
   useEffect(() => {
     if (step !== 'connect') return;
-    if (spotify !== 'linked' || apple !== 'linked') return;
+    if (spotify !== 'linked' && apple !== 'linked') return;
     if (autoMintedRef.current) return;
     autoMintedRef.current = true;
     mintCode();
@@ -233,9 +252,11 @@ function SyncPage({ className }: { className?: string }) {
     const joined = code.join('');
     if (joined.length !== ROOM_CODE_LENGTH) return;
     // Hand the room a preselected provider so MusicPanel doesn't
-    // re-prompt "Pick your music service" — both are linked here,
-    // Spotify is the primary surface, so default to it.
-    setPendingProvider('spotify');
+    // re-prompt "Pick your music service". When both are linked, Spotify
+    // is the primary surface; otherwise pick whichever the user actually
+    // linked so Apple-only (or Spotify-only) hosts still land prewired.
+    const preferred = spotify === 'linked' ? 'spotify' : apple === 'linked' ? 'apple' : null;
+    if (preferred) setPendingProvider(preferred);
     router.push(`/s/${joined}?host=1`);
   }
 
@@ -327,7 +348,7 @@ function SyncPage({ className }: { className?: string }) {
                     </div>
 
                     <AnimatePresence>
-                      {spotify === 'linked' && apple === 'linked' && (
+                      {(spotify === 'linked' || apple === 'linked') && (
                         <motion.button
                           key="proceed"
                           initial={{ opacity: 0, y: 6 }}
@@ -359,22 +380,8 @@ function SyncPage({ className }: { className?: string }) {
                     </AnimatePresence>
 
                     <p className="text-xs text-white/40 pt-8">
-                      Tokens stay in this browser only. By continuing, you
-                      agree to the{' '}
-                      <Link
-                        href="#"
-                        className="underline text-white/40 hover:text-white/60 transition-colors"
-                      >
-                        Terms
-                      </Link>{' '}
-                      and{' '}
-                      <Link
-                        href="#"
-                        className="underline text-white/40 hover:text-white/60 transition-colors"
-                      >
-                        Privacy Notice
-                      </Link>
-                      .
+                      Tokens stay in this browser only. Nothing leaves
+                      your device until the room goes live.
                     </p>
                   </motion.div>
                 ) : step === 'code' ? (
@@ -448,7 +455,7 @@ function SyncPage({ className }: { className?: string }) {
                         whileHover={{ scale: 1.02 }}
                         transition={{ duration: 0.2 }}
                       >
-                        synced via Spotify · Apple Music
+                        {syncedLabel(spotify, apple)}
                       </motion.p>
                     </div>
 
@@ -573,15 +580,6 @@ function MiniNavbar() {
 
   const logoElement = <NavLogo />;
 
-  const navLinksData = useMemo(
-    () => [
-      { label: 'Manifesto', href: '/' },
-      { label: 'How it works', href: '/' },
-      { label: 'Discover', href: '/' },
-    ],
-    [],
-  );
-
   const loginButtonElement = (
     <Link
       href="/"
@@ -633,14 +631,6 @@ function MiniNavbar() {
           <span className="label-caps text-white/55">VibeSync</span>
         </div>
 
-        <nav className="hidden sm:flex items-center space-x-4 sm:space-x-6 text-sm">
-          {navLinksData.map((link) => (
-            <AnimatedNavLink key={link.label} href={link.href}>
-              {link.label}
-            </AnimatedNavLink>
-          ))}
-        </nav>
-
         <div className="hidden sm:flex items-center gap-2 sm:gap-3">
           {loginButtonElement}
           {signupButtonElement}
@@ -689,43 +679,12 @@ function MiniNavbar() {
         className={`sm:hidden flex flex-col items-center w-full transition-all ease-in-out duration-300 overflow-hidden
                        ${isOpen ? 'max-h-[1000px] opacity-100 pt-4' : 'max-h-0 opacity-0 pt-0 pointer-events-none'}`}
       >
-        <nav className="flex flex-col items-center space-y-4 text-base w-full">
-          {navLinksData.map((link) => (
-            <Link
-              key={link.label}
-              href={link.href}
-              className="text-gray-300 hover:text-white transition-colors w-full text-center"
-            >
-              {link.label}
-            </Link>
-          ))}
-        </nav>
-        <div className="flex flex-col items-center space-y-4 mt-4 w-full">
+        <div className="flex flex-col items-center space-y-4 w-full">
           {loginButtonElement}
           {signupButtonElement}
         </div>
       </div>
     </header>
-  );
-}
-
-function AnimatedNavLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className="group relative inline-flex h-5 items-center overflow-hidden text-sm"
-    >
-      <div className="flex flex-col transition-transform duration-400 ease-out transform group-hover:-translate-y-1/2">
-        <span className="text-white/55">{children}</span>
-        <span className="text-white">{children}</span>
-      </div>
-    </Link>
   );
 }
 
@@ -905,6 +864,14 @@ function StatusPill({ status }: { status: Status }) {
     );
   }
   return null;
+}
+
+function syncedLabel(spotify: Status, apple: Status): string {
+  const parts: string[] = [];
+  if (spotify === 'linked') parts.push('Spotify');
+  if (apple === 'linked') parts.push('Apple Music');
+  if (parts.length === 0) return 'ready when you are';
+  return `synced via ${parts.join(' · ')}`;
 }
 
 function friendlyAppleError(err: unknown): string {

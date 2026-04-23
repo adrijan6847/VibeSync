@@ -2,15 +2,15 @@
 
 import { motion } from 'framer-motion';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AmbientBackdrop } from '@/components/AmbientBackdrop';
 import { DropOverlay } from '@/components/DropOverlay';
-import { HostLobbyPanel } from '@/components/music/HostLobbyPanel';
-import { HostSearchDock } from '@/components/music/HostSearchDock';
+import { BottomDock } from '@/components/live/BottomDock';
+import { Centerpiece } from '@/components/live/Centerpiece';
+import { SearchOverlay } from '@/components/live/SearchOverlay';
+import { TopBar } from '@/components/live/TopBar';
+import { HostLobbyPanel, ProviderReconnect } from '@/components/music/HostLobbyPanel';
 import { MusicPanel } from '@/components/music/MusicPanel';
-import { PlaybackBar } from '@/components/music/PlaybackBar';
-import { Orb } from '@/components/Orb';
-import { ParticipantRing } from '@/components/ParticipantRing';
 import { QR } from '@/components/QR';
 import { TapSurface } from '@/components/TapSurface';
 import { tick, unlock } from '@/lib/sound';
@@ -35,6 +35,7 @@ export default function SessionClient({ code }: Props) {
   const hostControl = isHost || isHostIntent;
 
   const [notFound, setNotFound] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   // Ref (not state) so a StrictMode double-mount or a render-triggered effect
   // re-run can't fire a second join while the first is still in flight.
   const joinAttemptedRef = useRef(alreadyJoined);
@@ -62,12 +63,15 @@ export default function SessionClient({ code }: Props) {
     });
   }, [connected, state, code, session]);
 
-  const joinUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '';
+  // Compute in an effect (not useMemo) so server render and the client's
+  // first render both see `''` — the QR block mounts only after hydration,
+  // avoiding a server/client HTML mismatch.
+  const [joinUrl, setJoinUrl] = useState('');
+  useEffect(() => {
     const url = new URL(window.location.href);
     url.searchParams.delete('host');
     url.searchParams.delete('j');
-    return url.toString();
+    setJoinUrl(url.toString());
   }, []);
 
   const handleTap = useCallback(() => {
@@ -154,53 +158,21 @@ export default function SessionClient({ code }: Props) {
       {/* Global beat-driven background pulse */}
       <BeatWash beatId={beatId} phase={phase} />
 
-      {/* Top bar */}
-      <div className="relative z-20 flex items-center justify-between px-5 pt-5 sm:px-8 sm:pt-6">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => router.push('/')}
-            className="mono flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3.5 text-[10.5px] font-medium tracking-[0.14em] text-white/50 transition-[background,color] duration-180 hover:bg-white/10 hover:text-white/70"
-          >
-            <span className="text-[13px] leading-none">←</span>
-            Leave
-          </button>
-        </div>
-        <div className="mono flex items-center gap-2.5 text-[10.5px] font-medium tracking-[0.18em] text-white/50">
-          <span className="relative flex h-1.5 w-1.5">
-            <span
-              className={`absolute inline-flex h-full w-full rounded-full ${
-                connected ? 'animate-ping' : 'animate-pulse'
-              } opacity-60`}
-              style={{
-                background: connected
-                  ? 'rgba(188, 220, 255, 0.5)'
-                  : 'rgba(200, 215, 230, 0.35)',
-              }}
-            />
-            <span
-              className="relative inline-flex h-1.5 w-1.5 rounded-full"
-              style={{
-                background: connected ? '#bcdcff' : 'rgba(200, 215, 230, 0.5)',
-              }}
-            />
-          </span>
-          {connected ? (
-            <>
-              <span className="uppercase">{code}</span>
-              <span className="text-white/20">·</span>
-              <span>{participants.length} live</span>
-            </>
-          ) : (
-            <>
-              <span className="uppercase">{code}</span>
-              <span className="text-white/20">·</span>
-              <span className="text-white/65">connecting…</span>
-            </>
-          )}
-        </div>
-      </div>
+      <TopBar
+        code={code}
+        liveCount={participants.length}
+        connected={connected}
+        // Only live-phase hosts see the search glyph — there's no point
+        // mid-session searching when the session hasn't started.
+        isHost={!isLobby && hostControl && music.adapterReady && !music.adapterError}
+        onLeave={() => router.push('/')}
+        onOpenSearch={() => setSearchOpen(true)}
+      />
 
-      {/* Centerpiece */}
+      {/* Centerpiece (shared between lobby + live; isLobby gates its
+          inner content + transport). Lobby scales it down as a
+          background element so the session-code / QR / start UI sit
+          in front without relayout. */}
       <motion.div
         className="absolute inset-0 z-10 flex items-center justify-center"
         animate={{
@@ -209,14 +181,22 @@ export default function SessionClient({ code }: Props) {
         }}
         transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
       >
-        <div className="relative aspect-square w-[min(86vw,86vh)] max-w-[720px]">
-          <ParticipantRing
-            participants={participants}
-            youId={you?.id}
-            radius={46}
-          />
-          <Orb energy={energy} phase={phase} beatId={beatId} />
-        </div>
+        <Centerpiece
+          participants={participants}
+          youId={you?.id}
+          nowPlaying={music.nowPlaying}
+          palette={music.palette}
+          clock={music.clock}
+          positionMs={music.positionMs}
+          driftMs={music.driftMs}
+          queueLength={music.queue.length}
+          isHost={hostControl}
+          isLobby={isLobby}
+          trackUnavailable={music.trackUnavailable}
+          onPlay={music.play}
+          onPause={music.pause}
+          onSeek={music.seek}
+        />
       </motion.div>
 
       {/* Tap surface — only in live phases */}
@@ -295,9 +275,10 @@ export default function SessionClient({ code }: Props) {
               {isHost || isHostIntent ? (
                 <motion.button
                   onClick={handleStart}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.97 }}
-                  className="relative overflow-hidden rounded-full border border-white/25 bg-white/95 px-10 py-[18px] text-[13px] font-semibold uppercase tracking-[0.18em] text-[#0a0a0a] shadow-[0_16px_48px_-16px_rgba(255,255,255,0.45)] transition-[background,box-shadow] duration-200 hover:bg-white hover:shadow-[0_20px_60px_-16px_rgba(255,255,255,0.55)]"
+                  whileHover={music.adapterError ? undefined : { scale: 1.02 }}
+                  whileTap={music.adapterError ? undefined : { scale: 0.97 }}
+                  disabled={Boolean(music.adapterError)}
+                  className="relative overflow-hidden rounded-full border border-white/25 bg-white/95 px-10 py-[18px] text-[13px] font-semibold uppercase tracking-[0.18em] text-[#0a0a0a] shadow-[0_16px_48px_-16px_rgba(255,255,255,0.45)] transition-[background,box-shadow] duration-200 hover:bg-white hover:shadow-[0_20px_60px_-16px_rgba(255,255,255,0.55)] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
                 >
                   Start the vibe
                 </motion.button>
@@ -312,58 +293,72 @@ export default function SessionClient({ code }: Props) {
                   <span className="uppercase">waiting for host</span>
                 </div>
               )}
-              <p className="label-caps text-white/25">
-                tap together · feel the drop
-              </p>
-            </div>
-        </div>
-      )}
-
-      {/* Live HUD — playback + participant list */}
-      {!isLobby && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-5 pb-6 transition-opacity duration-500 sm:px-10 sm:pb-10">
-            <div className="mx-auto flex max-w-[720px] flex-col gap-3">
-              {music.nowPlaying && (
-                <div className="pointer-events-auto">
-                  <PlaybackBar
-                    nowPlaying={music.nowPlaying}
-                    clock={music.clock}
-                    clockOffsetMs={clockOffset}
-                    isHost={hostControl}
-                    onPlay={music.play}
-                    onPause={music.pause}
-                    onSeek={music.seek}
-                  />
-                </div>
+              {(isHost || isHostIntent) && music.adapterError ? (
+                <p
+                  role="alert"
+                  className="label-caps max-w-[320px] text-center text-[#e8b4b4]/80"
+                >
+                  {music.adapterError}
+                </p>
+              ) : (
+                <p className="label-caps text-white/25">
+                  tap together · feel the drop
+                </p>
               )}
-              <div className="flex items-center gap-1.5">
-                {participants.slice(0, 12).map((p) => (
-                  <motion.span
-                    key={p.id}
-                    title={p.provider ? providerDisplayName(p.provider) : 'picking…'}
-                    initial={{ scale: 0, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
-                    className="block h-[5px] w-[5px] rounded-full"
-                    style={{
-                      background: `hsl(${p.hue}, 95%, 70%)`,
-                      outline: p.id === you?.id ? '1px solid rgba(255,255,255,0.6)' : undefined,
-                      outlineOffset: 2,
-                    }}
-                  />
-                ))}
-                <ProviderLegend participants={participants} compact />
-              </div>
             </div>
         </div>
       )}
 
-      {/* Host-only track swap dock — live phase, top center */}
-      {!isLobby && hostControl && music.adapterReady && (
-        <div className="pointer-events-none absolute left-1/2 top-16 z-30 -translate-x-1/2 sm:top-20">
-          <HostSearchDock onSearch={music.search} onPick={music.load} />
+      {/* Host-side adapter status (live phase). Search is reached via
+          the top-bar glyph now, so this panel is only here for the
+          error + loading states. */}
+      {!isLobby && hostControl && (music.adapterError || !music.adapterReady) && (
+        <div className="pointer-events-auto absolute left-1/2 top-16 z-30 -translate-x-1/2 sm:top-20">
+          {music.adapterError ? (
+            <div className="panel w-[min(92vw,360px)] rounded-2xl p-3 backdrop-blur-xl">
+              <ProviderReconnect
+                provider={music.provider}
+                message={music.adapterError}
+                onReconnect={() =>
+                  music.provider
+                    ? music.selectProvider(music.provider)
+                    : undefined
+                }
+              />
+            </div>
+          ) : (
+            <div
+              role="status"
+              className="panel flex items-center gap-2 rounded-full px-4 py-2 backdrop-blur-xl"
+            >
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/40 opacity-70" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white/60" />
+              </span>
+              <span className="label-caps text-[var(--fg-mute)]">
+                syncing music…
+              </span>
+            </div>
+          )}
         </div>
       )}
+
+      {/* Bottom dock — persistent live-phase secondary views. */}
+      {!isLobby && (
+        <BottomDock
+          queue={music.queue}
+          participants={participants}
+          youId={you?.id}
+        />
+      )}
+
+      {/* Search overlay — host-only, reboxed HostSearchDock. */}
+      <SearchOverlay
+        open={searchOpen && hostControl && music.adapterReady && !music.adapterError}
+        onClose={() => setSearchOpen(false)}
+        onSearch={music.search}
+        onPick={music.load}
+      />
 
       {/* Drop system (flash, shockwave, countdown, color wash) */}
       <DropOverlay
@@ -378,10 +373,8 @@ export default function SessionClient({ code }: Props) {
 
 function ProviderLegend({
   participants,
-  compact = false,
 }: {
   participants: Participant[];
-  compact?: boolean;
 }) {
   const counts = new Map<ProviderId, number>();
   for (const p of participants) {
@@ -391,11 +384,7 @@ function ProviderLegend({
   if (counts.size === 0) return null;
   const entries = Array.from(counts.entries());
   return (
-    <span
-      className={`mono ${
-        compact ? 'ml-3' : 'mt-1.5'
-      } block text-[9.5px] font-medium tracking-[0.14em] text-white/35`}
-    >
+    <span className="mono mt-1.5 block text-[9.5px] font-medium tracking-[0.14em] text-white/35">
       {entries
         .map(([id, n]) => {
           const name = providerDisplayName(id).toLowerCase();
